@@ -8298,7 +8298,8 @@ def _timeline_thumbnail_contact_sheet(proj, tl, p: Dict[str, Any]) -> Dict[str, 
             _restore_playhead(tl, original_timecode, what="the contact sheet")
     sheet_samples = [sample for sample in sampled if sample.get("thumbnail_rgb")]
     if not sheet_samples:
-        return {"success": False, "samples": sampled, "error": "No thumbnails could be sampled"}
+        return {"success": False, "samples": sampled, "error": "No thumbnails could be sampled",
+                "remediation": "Confirm a video item is under the playhead, open Color and bring Resolve to the front. If it remains empty, check the viewer and Resolve decoder/memory errors; a missing thumbnail does not prove clips are missing. Use timeline_frame quality='frame' only after Resolve is responsive."}
     for index, sample in enumerate(sheet_samples, 1):
         sample["label"] = _contact_sheet_sample_label(sample, index)
     width, height, png_bytes = _contact_sheet_png_bytes(
@@ -16362,7 +16363,9 @@ def _playhead_frame_preview(tl, p: Dict[str, Any]):
                         "Bring DaVinci Resolve to the front — the thumbnail API returns "
                         "nothing while Resolve is in the background, even on the Color "
                         "page (measured on Studio 19.1.3.7). Also confirm a video item "
-                        "sits under the playhead."
+                        "sits under the playhead. If both conditions hold, check the "
+                        "viewer and Resolve decoder/memory errors; an empty thumbnail "
+                        "does not prove the clip is missing."
                     ) if on_color else
                     "Open the Color page in Resolve and bring it to the front, or use quality='full'.",
                 )
@@ -16452,6 +16455,27 @@ def _timeline_subtitle_count(tl) -> int:
         return 0
 
 
+def _stop_frame_capture_render(proj, job, teardown: List[str]) -> bool:
+    """Confirm a capture render stopped before touching its job or output files."""
+    try:
+        if not proj.IsRenderingInProgress():
+            return True
+        proj.StopRendering()
+        for _ in range(20):
+            if not proj.IsRenderingInProgress():
+                return True
+            time.sleep(0.25)
+        detail = "Resolve still reports an active render after StopRendering"
+    except Exception as exc:
+        detail = f"could not confirm the render stopped: {type(exc).__name__}: {exc}"
+    teardown.append(
+        f"Capture job {job} and its output folder were retained because {detail}. "
+        "Stop the render in Resolve before deleting the job or retrying capture; "
+        "capture render settings were not restored while the render may be active."
+    )
+    return False
+
+
 def _playhead_frame_render(proj, tl, p: Dict[str, Any],
                            teardown: Optional[List[str]] = None):
     """Render exactly one frame — quality='render', used only when asked for.
@@ -16498,6 +16522,17 @@ def _playhead_frame_render(proj, tl, p: Dict[str, Any],
     """
     if teardown is None:
         teardown = []
+    required = ("IsRenderingInProgress", "GetRenderCodecs",
+                "SetCurrentRenderFormatAndCodec", "SetRenderSettings",
+                "AddRenderJob", "StartRendering", "StopRendering",
+                "GetRenderJobStatus", "DeleteRenderJob")
+    missing = [name for name in required if not _has_method(proj, name)]
+    if missing:
+        return _err(
+            f"Frame capture cannot call project methods: {', '.join(missing)}",
+            code="CAPTURE_API_UNAVAILABLE", category="precondition",
+            remediation="Check Resolve is still running and reconnect the MCP after a crash.",
+        )
     fmt = str(p.get("format", "jpg")).lower().lstrip(".")
     if fmt == "jpeg":
         fmt = "jpg"
@@ -16615,6 +16650,7 @@ def _playhead_frame_render(proj, tl, p: Dict[str, Any],
             original_marks = None
 
     job = None
+    render_started = False
     range_pinned = False
     original_target = None
     try:
@@ -16679,10 +16715,18 @@ def _playhead_frame_render(proj, tl, p: Dict[str, Any],
         # Resolve (reported on 21.0.4.5 free/Windows, PR #165).
         if not proj.StartRendering([job], False):
             return _err("StartRendering refused the job", code="RENDER_START_FAILED", category="api_error")
+        render_started = True
         waited = 0.0
         while proj.IsRenderingInProgress() and waited < 120:
             time.sleep(0.25)
             waited += 0.25
+        if waited >= 120:
+            return _err(
+                "Single-frame render exceeded 120 seconds; stopping the capture job.",
+                code="CAPTURE_RENDER_TIMEOUT", category="api_error",
+                remediation="Check Resolve's decoder and memory errors before retrying.",
+                state={"job_id": job, "frame": frame},
+            )
         status = _ser(proj.GetRenderJobStatus(job)) or {}
         # Localized JobStatus ("Concluso" on an Italian install, issue #191)
         # cannot be compared to the English word; the file check below is the
@@ -16726,154 +16770,157 @@ def _playhead_frame_render(proj, tl, p: Dict[str, Any],
             )
         return Image(data=data, format=out_format)
     finally:
-        if job:
+        cleanup_safe = (not render_started or
+                        _stop_frame_capture_render(proj, job, teardown))
+        if cleanup_safe:
+            if job:
+                try:
+                    proj.DeleteRenderJob(job)
+                except Exception:
+                    pass
+            if original_mode is not None and original_mode != 1:
+                # Same teardown contract as the format/codec restore below.
+                try:
+                    restored_mode = bool(proj.SetCurrentRenderMode(original_mode))
+                except Exception as exc:
+                    restored_mode, mode_exc = False, exc
+                else:
+                    mode_exc = None
+                if not restored_mode:
+                    logger.warning(
+                        "frame capture could not restore render mode %r: %s",
+                        original_mode, mode_exc or "SetCurrentRenderMode returned False",
+                    )
+                    teardown.append(
+                        f"The render mode was left on single clip (1); restoring {original_mode!r} "
+                        "failed. Put it back with render(action='set_mode')."
+                    )
+            if original_fc:
+                # A failed restore leaves the Deliver page on the capture's format
+                # and codec, which the user's next render would silently inherit.
+                # This runs in a teardown path, so it is logged rather than raised.
+                # The getter reports descriptions ('H.264'); the setter wants ids
+                # ('H264') and refuses the description (issue #296).
+                restore_fmt, restore_codec = _canonical_render_format_codec(
+                    proj, original_fc.get("format"), original_fc.get("codec"))
+                try:
+                    restored_fc = proj.SetCurrentRenderFormatAndCodec(restore_fmt, restore_codec)
+                except Exception as exc:
+                    restored_fc, restore_exc = False, exc
+                else:
+                    restore_exc = None
+                if not restored_fc:
+                    logger.warning(
+                        "frame capture could not restore the render format/codec to %s/%s: %s",
+                        restore_fmt, restore_codec,
+                        restore_exc or "SetCurrentRenderFormatAndCodec returned False",
+                    )
+                    teardown.append(
+                        "The render format/codec was left on the capture's "
+                        f"({fmt}); restoring {restore_fmt}/{restore_codec} "
+                        "failed, so the next render job would inherit it."
+                    )
+            # The mark range: put the user's own range back when they had one, and
+            # fall back to the whole timeline when they did not, so the range is
+            # never left pinned to the captured frame for the next render job to
+            # inherit.
+            # (original_marks is already in SetRenderSettings' absolute space — see
+            # the offset above.)
+            #
+            # The range goes in a payload of its own. It used to travel with
+            # CustomName "", and SetRenderSettings refuses an empty CustomName by
+            # rejecting the WHOLE payload (measured on Studio 19.1.3.7: False, and a
+            # job added afterwards still carried MarkIn == MarkOut == the captured
+            # frame). So the range was never put back, and the False was discarded.
+            # One setting per payload, each return checked.
             try:
-                proj.DeleteRenderJob(job)
-            except Exception:
-                pass
-        if original_mode is not None and original_mode != 1:
-            # Same teardown contract as the format/codec restore below.
-            try:
-                restored_mode = bool(proj.SetCurrentRenderMode(original_mode))
+                if original_marks:
+                    restored_marks = {
+                        "SelectAllFrames": False,
+                        "MarkIn": original_marks["in"],
+                        "MarkOut": original_marks["out"],
+                    }
+                else:
+                    restored_marks = {
+                        "SelectAllFrames": True,
+                        "MarkIn": tl.GetStartFrame(),
+                        "MarkOut": tl.GetEndFrame(),
+                    }
+                marks_restored = bool(proj.SetRenderSettings(restored_marks))
+                marks_exc = None
             except Exception as exc:
-                restored_mode, mode_exc = False, exc
-            else:
-                mode_exc = None
-            if not restored_mode:
+                marks_restored, marks_exc = False, exc
+            if not marks_restored:
                 logger.warning(
-                    "frame capture could not restore render mode %r: %s",
-                    original_mode, mode_exc or "SetCurrentRenderMode returned False",
+                    "frame capture could not restore the render range: %s",
+                    marks_exc or "SetRenderSettings returned False",
                 )
-                teardown.append(
-                    f"The render mode was left on single clip (1); restoring {original_mode!r} "
-                    "failed. Put it back with render(action='set_mode')."
-                )
-        if original_fc:
-            # A failed restore leaves the Deliver page on the capture's format
-            # and codec, which the user's next render would silently inherit.
-            # This runs in a teardown path, so it is logged rather than raised.
-            # The getter reports descriptions ('H.264'); the setter wants ids
-            # ('H264') and refuses the description (issue #296).
-            restore_fmt, restore_codec = _canonical_render_format_codec(
-                proj, original_fc.get("format"), original_fc.get("codec"))
-            try:
-                restored_fc = proj.SetCurrentRenderFormatAndCodec(restore_fmt, restore_codec)
-            except Exception as exc:
-                restored_fc, restore_exc = False, exc
-            else:
-                restore_exc = None
-            if not restored_fc:
-                logger.warning(
-                    "frame capture could not restore the render format/codec to %s/%s: %s",
-                    restore_fmt, restore_codec,
-                    restore_exc or "SetCurrentRenderFormatAndCodec returned False",
-                )
-                teardown.append(
-                    "The render format/codec was left on the capture's "
-                    f"({fmt}); restoring {restore_fmt}/{restore_codec} "
-                    "failed, so the next render job would inherit it."
-                )
-        # The mark range: put the user's own range back when they had one, and
-        # fall back to the whole timeline when they did not, so the range is
-        # never left pinned to the captured frame for the next render job to
-        # inherit.
-        # (original_marks is already in SetRenderSettings' absolute space — see
-        # the offset above.)
-        #
-        # The range goes in a payload of its own. It used to travel with
-        # CustomName "", and SetRenderSettings refuses an empty CustomName by
-        # rejecting the WHOLE payload (measured on Studio 19.1.3.7: False, and a
-        # job added afterwards still carried MarkIn == MarkOut == the captured
-        # frame). So the range was never put back, and the False was discarded.
-        # One setting per payload, each return checked.
-        try:
-            if original_marks:
-                restored_marks = {
-                    "SelectAllFrames": False,
-                    "MarkIn": original_marks["in"],
-                    "MarkOut": original_marks["out"],
-                }
-            else:
-                restored_marks = {
-                    "SelectAllFrames": True,
-                    "MarkIn": tl.GetStartFrame(),
-                    "MarkOut": tl.GetEndFrame(),
-                }
-            marks_restored = bool(proj.SetRenderSettings(restored_marks))
-            marks_exc = None
-        except Exception as exc:
-            marks_restored, marks_exc = False, exc
-        if not marks_restored:
-            logger.warning(
-                "frame capture could not restore the render range: %s",
-                marks_exc or "SetRenderSettings returned False",
-            )
-            if range_pinned:
-                teardown.append(
-                    f"The render range was left pinned to the captured frame ({frame}); "
-                    "restoring it failed, so the next render job would render one "
-                    "frame. Set the range again before rendering."
-                )
-        # The output folder, when there was one to read. Without this the
-        # user's next render job inherits a temporary folder that the cleanup
-        # just below removes.
-        # Deleting the folder Deliver is still pointed at raises the modal
-        # "Render Path Inaccessible". Remove it only after the user's own path
-        # is back. A project that never had one cannot have it cleared, so the
-        # folder stays (issue #296).
-        target_moved = False
-        if range_pinned and original_target:
-            try:
-                target_restored = bool(proj.SetRenderSettings({"TargetDir": original_target}))
-                target_exc = None
-            except Exception as exc:
-                target_restored, target_exc = False, exc
-            if target_restored:
-                target_moved = True
-            else:
-                logger.warning(
-                    "frame capture could not restore the render output folder to %s: %s",
-                    original_target, target_exc or "SetRenderSettings returned False",
-                )
+                if range_pinned:
+                    teardown.append(
+                        f"The render range was left pinned to the captured frame ({frame}); "
+                        "restoring it failed, so the next render job would render one "
+                        "frame. Set the range again before rendering."
+                    )
+            # The output folder, when there was one to read. Without this the
+            # user's next render job inherits a temporary folder that the cleanup
+            # just below removes.
+            # Deleting the folder Deliver is still pointed at raises the modal
+            # "Render Path Inaccessible". Remove it only after the user's own path
+            # is back. A project that never had one cannot have it cleared, so the
+            # folder stays (issue #296).
+            target_moved = False
+            if range_pinned and original_target:
+                try:
+                    target_restored = bool(proj.SetRenderSettings({"TargetDir": original_target}))
+                    target_exc = None
+                except Exception as exc:
+                    target_restored, target_exc = False, exc
+                if target_restored:
+                    target_moved = True
+                else:
+                    logger.warning(
+                        "frame capture could not restore the render output folder to %s: %s",
+                        original_target, target_exc or "SetRenderSettings returned False",
+                    )
+                    teardown.append(
+                        "The render output folder was left on the capture's temporary "
+                        f"folder ({folder}); restoring {original_target!r} failed. "
+                        "The folder was kept so Deliver is not left pointing at a "
+                        "missing path, which raises Resolve's 'Render Path Inaccessible' "
+                        "dialog. Set it again with render(action='set_settings', "
+                        "params={'settings': {'TargetDir': ...}})."
+                    )
+            elif range_pinned:
                 teardown.append(
                     "The render output folder was left on the capture's temporary "
-                    f"folder ({folder}); restoring {original_target!r} failed. "
-                    "The folder was kept so Deliver is not left pointing at a "
-                    "missing path, which raises Resolve's 'Render Path Inaccessible' "
-                    "dialog. Set it again with render(action='set_settings', "
+                    f"folder ({folder}). This project had no render path to put back, "
+                    "and removing the folder would leave Deliver pointing at a missing "
+                    "path, which raises Resolve's 'Render Path Inaccessible' dialog. "
+                    "Set a render path with render(action='set_settings', "
                     "params={'settings': {'TargetDir': ...}})."
                 )
-        elif range_pinned:
-            teardown.append(
-                "The render output folder was left on the capture's temporary "
-                f"folder ({folder}). This project had no render path to put back, "
-                "and removing the folder would leave Deliver pointing at a missing "
-                "path, which raises Resolve's 'Render Path Inaccessible' dialog. "
-                "Set a render path with render(action='set_settings', "
-                "params={'settings': {'TargetDir': ...}})."
-            )
-        if target_moved or not range_pinned:
-            _discard_still_staging(folder)
-        try:
-            os.rmdir(base)  # only ever succeeds when nothing else is using it
-        except OSError:
-            pass
-        if not _restore_playhead(tl, original_tc, what="the render capture"):
-            teardown.append(
-                f"The playhead was not put back at {original_tc}. Restore it with "
-                "timeline_markers(action='set_current_timecode')."
-            )
-        # Last, and checked: the render calls pull Resolve onto Deliver. The
-        # switch back is read back, and reported when it does not take.
-        if original_page and original_page != "deliver":
-            page = _restore_page(resolve, original_page, what="the render capture")
-            if not page["restored"]:
+            if target_moved or not range_pinned:
+                _discard_still_staging(folder)
+            try:
+                os.rmdir(base)  # only ever succeeds when nothing else is using it
+            except OSError:
+                pass
+            if not _restore_playhead(tl, original_tc, what="the render capture"):
                 teardown.append(
-                    f"Resolve is not back on the {original_page!r} page (it reads "
-                    f"{page['page']!r}): the switch failed after {page['attempts']} "
-                    f"attempt(s) ({page['error']}). Restore it with "
-                    f"resolve_control(action='open_page', params={{'page': {original_page!r}}})."
+                    f"The playhead was not put back at {original_tc}. Restore it with "
+                    "timeline_markers(action='set_current_timecode')."
                 )
+            # Last, and checked: the render calls pull Resolve onto Deliver. The
+            # switch back is read back, and reported when it does not take.
+            if original_page and original_page != "deliver":
+                page = _restore_page(resolve, original_page, what="the render capture")
+                if not page["restored"]:
+                    teardown.append(
+                        f"Resolve is not back on the {original_page!r} page (it reads "
+                        f"{page['page']!r}): the switch failed after {page['attempts']} "
+                        f"attempt(s) ({page['error']}). Restore it with "
+                        f"resolve_control(action='open_page', params={{'page': {original_page!r}}})."
+                    )
 
 
 def _playhead_frame_full(proj, tl, p: Dict[str, Any]):
@@ -17268,6 +17315,13 @@ def _playhead_frame_capture(p: Dict[str, Any]):
             result = _playhead_frame_full(proj, tl, p)
         else:
             result = _playhead_frame_render(proj, tl, p, teardown)
+    except Exception as exc:
+        logger.exception("Frame capture failed")
+        result = _err(
+            f"Frame capture failed: {type(exc).__name__}: {exc}",
+            code="FRAME_CAPTURE_FAILED", category="api_error",
+            remediation="Check Resolve is responsive; inspect the MCP traceback and Resolve logs before retrying.",
+        )
     finally:
         if original_tl is not None:
             # Best-effort by necessity: this runs in a finally, so raising or

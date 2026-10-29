@@ -1973,6 +1973,16 @@ playhead, timeline, render mode, format, range or output folder), the image is
 followed by a `{"warnings": [...]}` block naming what was left changed and the
 call that puts it back. No warnings block means every restore was confirmed.
 
+A capture render times out after 120 seconds. Cleanup first confirms the render
+has stopped. If stopping cannot be confirmed, the render job and capture files
+are retained, render settings are not restored during the active render, and
+warnings explain the state. Missing native methods and capture exceptions return
+structured errors; exceptions also record a traceback in the MCP log. After a
+Resolve crash, reconnect before retrying. Empty thumbnails can also reflect
+viewer/decoder failure: check Resolve's logs for memory allocation errors before
+batch-seeking through high-resolution footage. A missing thumbnail alone does
+not prove a missing clip.
+
 ```
 timeline_frame(action="capture", params={"timecode": "01:00:15:12", "max_width": 1280})
 ```

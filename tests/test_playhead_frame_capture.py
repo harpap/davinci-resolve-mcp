@@ -302,7 +302,7 @@ class _RenderCapture:
                  resolve=None, range_restore_ok=True, user_target=USER_TARGET,
                  user_name="userA", target_restore_ok=True, job_delete_ok=True,
                  existing=None, render_formats=None, codecs_for=None,
-                 subtitle_tracks=0):
+                 subtitle_tracks=0, stuck_render=False, stop_refused=False):
         """Returns (result, project mock, list of SetRenderSettings payloads)."""
         resolve = resolve or _FakeResolve(page="color")
         tl = _fake_timeline(resolve)
@@ -313,7 +313,18 @@ class _RenderCapture:
         state = {"TargetDir": user_target, "CustomName": user_name, "range": None,
                  "jobs": {}, "queued": 0}
         proj.render_state = state
-        proj.IsRenderingInProgress.side_effect = [rendering, False]
+        render_state = {"started": False, "stopped": False}
+        proj.IsRenderingInProgress.side_effect = lambda: (
+            stuck_render and not render_state["stopped"]
+            if render_state["started"] else rendering
+        )
+
+        def _stop():
+            if not stop_refused:
+                render_state["stopped"] = True
+            return not stop_refused
+
+        proj.StopRendering.side_effect = _stop
 
         def _mode():
             resolve.page = "deliver"
@@ -371,6 +382,7 @@ class _RenderCapture:
             return state["jobs"].pop(job_id, None) is not None
 
         def _start(jobs, interactive=False, **kwargs):
+            render_state["started"] = True
             # Rendering pulls Resolve onto the Deliver page, whatever page the
             # caller was on.
             resolve.page = "deliver"
@@ -408,6 +420,53 @@ class _RenderCapture:
              mock.patch.object(s._playback_guard.time, "sleep"):
             out = s.timeline_frame("capture", params)
         return out, proj, calls
+
+
+class CaptureFailureSafetyTest(_RenderCapture, unittest.TestCase):
+    def test_timeout_stops_render_before_removing_job_and_files(self):
+        out, proj, _ = self._capture({"quality": "render", "frame": 86424}, stuck_render=True)
+        self.assertEqual(out["error"]["code"], "CAPTURE_RENDER_TIMEOUT")
+        proj.StopRendering.assert_called_once()
+        self.assertEqual(proj.render_state["jobs"], {})
+        self.assertFalse(os.path.exists(self.capture_base))
+        calls = proj.method_calls
+        self.assertLess(calls.index(mock.call.StopRendering()),
+                        calls.index(mock.call.DeleteRenderJob("job-2")))
+
+    def test_unstoppable_render_keeps_job_files_and_reports_restore_skipped(self):
+        out, proj, _ = self._capture({"quality": "render", "frame": 86424}, stuck_render=True, stop_refused=True)
+        self.assertEqual(out["error"]["code"], "CAPTURE_RENDER_TIMEOUT")
+        self.assertIn("retained", out["warnings"][0])
+        self.assertIn("job-2", proj.render_state["jobs"])
+        self.assertTrue(os.path.exists(self.capture_base))
+        self.assertEqual(proj.render_state["range"], (False, 86424, 86424))
+
+    def test_native_exception_returns_diagnostic_and_restore_warnings(self):
+        resolve = _FakeResolve()
+        tl = _fake_timeline(resolve)
+
+        def failed_capture(proj, timeline, params, teardown):
+            teardown.append("restore failed")
+            raise TypeError("'NoneType' object is not callable")
+
+        with mock.patch.object(s, "get_resolve", return_value=resolve), \
+             mock.patch.object(s, "_get_tl", return_value=(mock.Mock(), tl, None)), \
+             mock.patch.object(s, "_playhead_frame_render", side_effect=failed_capture), \
+             self.assertLogs(s.logger, level="ERROR") as logs:
+            out = s.timeline_frame("capture", {"quality": "render"})
+        self.assertEqual(out["error"]["code"], "FRAME_CAPTURE_FAILED")
+        self.assertIn("TypeError", out["error"]["message"])
+        self.assertEqual(out["warnings"], ["restore failed"])
+        self.assertIn("Traceback", "\n".join(logs.output))
+
+    def test_missing_render_method_is_refused_before_mutation(self):
+        proj = mock.Mock()
+        proj.StartRendering = None
+        out = s._playhead_frame_render(proj, mock.Mock(), {})
+        self.assertEqual(out["error"]["code"], "CAPTURE_API_UNAVAILABLE")
+        self.assertIn("StartRendering", out["error"]["message"])
+        proj.AddRenderJob.assert_not_called()
+        proj.SetRenderSettings.assert_not_called()
 
 
 class CaptureRenderTest(_RenderCapture, unittest.TestCase):
