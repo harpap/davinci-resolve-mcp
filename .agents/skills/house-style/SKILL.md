@@ -77,6 +77,10 @@ _Not yet captured._
 
 ## Resolve execution and snag handling
 
+- When analyzed regions have been approved for cuts or track routing, perform
+  those edits. Markers are supporting evidence, not a substitute for the
+  requested timeline changes. Preserve the editor's explicit cursor boundary
+  and follow the existing example clips' destination track.
 - After an interrupted, delayed, or failed editing call, stop and inspect the
   actual Resolve timeline and representative rendered frames before retrying.
   Clips can appear even when the call has not returned; assuming failure can
