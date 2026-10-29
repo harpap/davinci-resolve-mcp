@@ -43,7 +43,7 @@ _Not yet captured._
 
 <!-- What earns a place in the cut; what gets dropped even when it's a good shot. -->
 
-_Not yet captured._
+Every trailer shot must show a clear subject, action, or distinctive place in the final phone crop. Replace generic road passes, railings, and distant details that lose their meaning when cropped vertically. Preserve meaningful changes of activity or motorcycle; a short travel trailer should include the distinctive bike-riding experience, not only repeated views from one cockpit.
 
 ## Cut points
 
@@ -74,6 +74,23 @@ thrown away:
 <!-- Aspect ratios, timeline naming, versioning, where renders go. -->
 
 _Not yet captured._
+
+## Resolve execution and snag handling
+
+- After an interrupted, delayed, or failed editing call, stop and inspect the
+  actual Resolve timeline and representative rendered frames before retrying.
+  Clips can appear even when the call has not returned; assuming failure can
+  duplicate completed work.
+- Use the MCP editing tools for cutting. Do not write or run custom cutting
+  scripts as a fallback. If those tools fail, report the snag and the verified
+  timeline state to the user before choosing another approach.
+- On memory-limited footage, perform Resolve operations sequentially and avoid
+  batch seeking or simultaneous analysis/render jobs. Check available RAM and
+  decoder errors before expensive work; save and restart Resolve when retained
+  preview buffers materially reduce headroom. Use a recoverable lower-resolution
+  working timeline when appropriate. A resized capture still decodes the original
+  media and does not by itself reduce decoder memory. Stop and report new memory
+  allocation failures rather than repeating the failed operation.
 
 ---
 

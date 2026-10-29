@@ -73,6 +73,24 @@ Analysis informs Resolve actions. At no point do we create intermediate files th
 
 ## Setup
 
+### Wind-heavy travel footage
+
+When the user identifies wind or engine noise as false speech, do not use the
+native transcript to select dialogue. Label it untrusted. A waveform or automatic
+transcription alone does not confirm a speaker: use audible review or corroborating
+visual evidence, and distinguish confirmed dialogue from possible speech. Keep
+complete conversational moments when word boundaries cannot be verified. Do not
+claim audio was listened to when only frames or automatic classifications were reviewed.
+
+For repo-local analysis requested by the user, use the ignored
+`davinci-resolve-mcp-analysis/` directory with a project/session subfolder. Store
+timecoded visual observations, speech-confidence notes, frame references, source
+selects, and a cut manifest there. Keep source files read-only. If the user asks
+to disregard transcription, explicitly disable it for that run while retaining
+visual analysis and Resolve metadata/marker writeback. Complete deferred host
+vision with `commit_vision`. Sampled frames establish what appears at the sampled
+times, not that the whole clip was watched.
+
 On first use, ask the user the three setup questions documented in the guide:
 1. Where to save analysis files (alongside / directory / project)
 2. Tool detection (FFprobe required, FFmpeg/Whisper optional)
