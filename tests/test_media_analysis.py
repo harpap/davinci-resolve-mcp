@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -14,6 +15,7 @@ from typing import Any, Dict, Optional
 
 from src import server as _server_module
 from src.utils import media_analysis as _media_analysis_module
+from src.utils import timeline_brain_db
 from src.server import (
     _apply_media_analysis_clip_markers,
     _apply_sync_event_markers,
@@ -338,6 +340,22 @@ class TimelineProjectStub:
 
 
 class MediaAnalysisPlanningTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def _analysis_tmp(self):
+        """A temp dir whose cached SQLite handles close before it is removed.
+
+        These tests run analysis into `tmp`, which opens
+        `_soul/timeline_brain.sqlite` through the cached connection. Windows
+        cannot delete the directory while that handle is open, and an
+        `addCleanup` registered inside the block runs too late: after the
+        `with` has already tried to remove it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                yield tmp
+            finally:
+                timeline_brain_db.close_all()
+
     def _write_synthetic_media(self, source):
         cmd = [
             "ffmpeg",
@@ -408,7 +426,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertIn("example-project", out["project_root"])
 
     def test_dashboard_context_switch_scopes_active_project_root_and_related_versions(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             analysis_root = os.path.join(tmp, "analysis")
             previous = resolve_output_root(
                 project_name="Example Project",
@@ -442,7 +460,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertNotIn("setPanel(", menu_branch)
 
     def test_output_root_rejects_source_adjacent_writes(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "camera-card")
             os.makedirs(source_dir)
             source = os.path.join(source_dir, "A001_C001.mov")
@@ -520,7 +538,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
     def test_resolve_clip_directory_reuses_legacy_clip_id_folder(self):
         """Migration: a folder written under the old clip_id-first basis is
         reused on the next write instead of being orphaned under a new name."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             record = {
                 "clip_name": "c0001.mp4",
@@ -539,7 +557,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
 
     def test_resolve_clip_directory_reuses_folder_after_rename(self):
         """A renamed clip writes back into its existing folder (no orphan)."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             record = {
                 "clip_name": "c0001.mp4",
@@ -556,7 +574,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             )
 
     def test_resolve_clip_directory_mints_canonical_path_when_absent(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             record = {
                 "clip_name": "c0001.mp4",
@@ -576,7 +594,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         return clip_dir
 
     def test_clip_index_indexes_all_stable_ids_from_report(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             self._write_report(
                 project_root,
@@ -602,7 +620,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         """The edge the manifest exists for: a clip analyzed while online (folder
         hashed on file path) that the live inventory later reports offline with
         no file path, only a clip_id. The index still resolves it. #51."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             online = {
                 "clip_name": "c0001.mp4",
@@ -626,7 +644,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             self.assertEqual(entry["analysis_status"], "analyzed")
 
     def test_clip_index_rebuilds_when_report_added(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             self._write_report(
                 project_root, "a-aaaaaaaa0001",
@@ -647,7 +665,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
 
     def test_analysis_status_counts_renamed_clip_as_analyzed(self):
         """Issue #51: a clip renamed after analysis still counts as analyzed."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             record = {
                 "clip_name": "c0001.mp4",
@@ -677,7 +695,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
     def test_analysis_status_counts_renamed_clip_from_reused_job_report(self):
         """Issue #51: rename also resolves via the jobs DB when the report is
         a reused batch report living outside the local clips/ dir."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "active-root")
             os.makedirs(project_root, exist_ok=True)
             record = {
@@ -811,7 +829,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         })
         self.assertIsNone(error)
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             artifacts = {
                 "analysis_json": os.path.join(tmp, "analysis.json"),
                 "transcript_json": os.path.join(tmp, "transcript.json"),
@@ -854,7 +872,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             "response_field": "result",
         }
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             result = _transcribe_with_http_provider(
                 "/tmp/source.wav",
                 {"analysis_json": os.path.join(tmp, "analysis.json")},
@@ -866,7 +884,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(result["error"], "HTTP transcription response did not include 'result'.")
 
     def test_request_capabilities_report_host_chat_paths_vision(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             previous = os.environ.get("DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS")
             os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = os.path.join(tmp, "prefs.json")
             try:
@@ -890,7 +908,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                     os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = previous
 
     def test_host_chat_paths_payload_emits_frame_paths_and_commit_action(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             frame_path = os.path.join(tmp, "frame.jpg")
             with open(frame_path, "wb") as handle:
                 handle.write(b"sample-frame-bytes")
@@ -933,7 +951,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         The host chat needs this table to author one shot_descriptions entry per shot,
         grounded in the specific frame_indices for that shot rather than nearest neighbours.
         """
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             frames_dir = os.path.join(tmp, "frames")
             os.makedirs(frames_dir, exist_ok=True)
             paths = []
@@ -987,7 +1005,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         temporally-nearest analysis_keyframe's description into every adjacent shot,
         producing wrong labels for shots without a per-shot keyframe.
         """
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             clip_dir = os.path.join(project_root, "clips", "shotty")
             os.makedirs(clip_dir, exist_ok=True)
@@ -1059,7 +1077,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         the fallback must NOT pick a far-away keyframe — it should land on the
         clip_summary-tagged fallback so the marker is honest about being unverified.
         """
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             clip_dir = os.path.join(project_root, "clips", "partial")
             os.makedirs(clip_dir, exist_ok=True)
@@ -1119,7 +1137,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             self.assertNotIn("Opening fisheye", shot_markers["shot-003"]["visual_description"])
 
     def test_commit_visual_analysis_merges_into_existing_report(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             clip_dir = os.path.join(project_root, "clips", "demo-clip")
             os.makedirs(clip_dir, exist_ok=True)
@@ -1171,7 +1189,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             self.assertIn("empty", updated["visual"]["editing_notes"]["search_tags"])
 
     def test_commit_visual_analysis_rejects_mismatched_vision_token(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             clip_dir = os.path.join(project_root, "clips", "demo-clip")
             os.makedirs(clip_dir, exist_ok=True)
@@ -1256,7 +1274,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             def GetMarkers(self):
                 return self.markers
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "20260517_sample-fc314309e4")
             clip_dir = os.path.join(project_root, "clips", "demo-clip")
             os.makedirs(clip_dir, exist_ok=True)
@@ -1361,7 +1379,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
 
     def test_review_api_list_clip_shot_frame(self):
         """V2 Review API: bin grid + clip detail + shot detail + frame serving."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "demo-project-aabbccdd")
             clip_dir = os.path.join(project_root, "clips", "demo-clip")
             os.makedirs(os.path.join(clip_dir, "frames"), exist_ok=True)
@@ -1420,7 +1438,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
 
     def test_review_api_follows_reusable_batch_report_paths(self):
         """Review API includes reusable reports referenced by the active project's job DB."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             active_root = os.path.join(tmp, "active-project-aabbccdd")
             source_root = os.path.join(tmp, "source-project-eeff001122")
             clip_dir = os.path.join(source_root, "clips", "reused-clip")
@@ -1487,7 +1505,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
 
     def test_commit_visual_analysis_preserves_human_corrections(self):
         """V2 trust-but-fix-optionally contract: re-analysis preserves human edits."""
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             project_root = os.path.join(tmp, "project-root")
             clip_dir = os.path.join(project_root, "clips", "demo-clip")
             os.makedirs(clip_dir, exist_ok=True)
@@ -1856,7 +1874,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertTrue(applied["success"])
         self.assertEqual(len(clip.GetMarkers()), 5)
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             previous = os.environ.get("DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS")
             os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = os.path.join(tmp, "prefs.json")
             try:
@@ -1920,7 +1938,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         underlying choice. The saved-default preference is still persisted for
         forward-compat when the gate is reopened.
         """
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             previous = os.environ.get("DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS")
             os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = os.path.join(tmp, "prefs.json")
             try:
@@ -1956,7 +1974,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                     os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = previous
 
     def test_setup_tool_sets_conversation_defaults(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             previous_analysis = os.environ.get("DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS")
             previous_updates = os.environ.get(update_check.ENV_STATE_PATH)
             os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = os.path.join(tmp, "analysis-prefs.json")
@@ -2050,7 +2068,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                     os.environ[update_check.ENV_STATE_PATH] = previous_updates
 
     def test_media_analysis_defaults_turn_on_host_chat_paths_vision(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             previous = os.environ.get("DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS")
             os.environ["DAVINCI_RESOLVE_MCP_MEDIA_ANALYSIS_PREFS"] = os.path.join(tmp, "prefs.json")
             try:
@@ -2171,7 +2189,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertIn("Description", provenance["davinci_resolve_mcp.changed_fields"])
 
     def test_build_plan_reports_artifacts_under_project_root(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             records = [{
@@ -2205,7 +2223,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["analysis_keyframe_budget_per_clip"], 8)
 
     def test_build_plan_allows_chat_context_vision_without_external_provider_env(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             records = [{
@@ -2239,7 +2257,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["capability_gaps"], [])
 
     def test_build_plan_hints_when_transcription_available_but_explicitly_disabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             records = [{
@@ -2272,7 +2290,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertTrue(any("Transcription is available but disabled" in note for note in plan["notes"]))
 
     def test_build_plan_defaults_transcription_on_for_standard_depth(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             records = [{
@@ -2303,7 +2321,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertIn("transcript_json", plan["clips"][0]["artifacts"])
 
     def test_build_plan_blocks_default_transcription_when_backend_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             records = [{
@@ -2337,7 +2355,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertIn("install", response["next_step"].lower())
 
     def test_build_plan_reuses_existing_complete_report(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             open(source, "wb").close()
@@ -2403,7 +2421,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(manifest["clips"][0]["cache_status"], "reusable")
 
     def test_build_plan_detects_stale_source_signature(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as f:
@@ -2472,7 +2490,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertIn("source_size_bytes_changed", plan["clips"][0]["existing_report"]["cache_issues"])
 
     def test_build_plan_reuses_report_from_same_name_project_version_root(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2546,7 +2564,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertTrue(plan["clips"][0]["artifacts"]["analysis_json"].startswith(active_root))
 
     def test_build_plan_searches_related_project_roots_by_default(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2621,7 +2639,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["clips"][0]["existing_report"]["path"], report_path)
 
     def test_build_plan_can_disable_related_project_root_search(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2684,7 +2702,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["clips"][0]["cache_status"], "miss")
 
     def test_build_plan_reuses_report_path_from_clip_record_metadata(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2812,7 +2830,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertIn("standard_metadata_fields", records[0]["analysis_provenance"])
 
     def test_build_plan_reuses_global_registry_when_related_search_disabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2882,7 +2900,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["reuse_summary"]["sources"]["analysis_registry"], 1)
 
     def test_plan_blocks_silent_reanalysis_when_provenance_report_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2931,7 +2949,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(executed["status"], "reuse_blocked")
 
     def test_force_refresh_bypasses_reuse_block(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             with open(source, "wb") as handle:
@@ -2971,7 +2989,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["clips"][0]["cache_status"], "refresh_forced")
 
     def test_build_plan_force_refresh_bypasses_reuse(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             open(source, "wb").close()
@@ -3028,7 +3046,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertNotIn("existing_report", plan["clips"][0])
 
     def test_build_plan_does_not_reuse_when_requested_vision_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source = os.path.join(tmp, "source", "A001_C001.mov")
             os.makedirs(os.path.dirname(source))
             open(source, "wb").close()
@@ -3086,7 +3104,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(plan["clips"][0]["existing_report"]["missing_layers"], ["vision"])
 
     def test_bin_target_recurses_and_dedupes_sources(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             path_a = os.path.join(tmp, "A001_C001.mov")
             path_b = os.path.join(tmp, "A001_C002.mov")
             root = FolderStub("Master", clips=[
@@ -3106,7 +3124,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertTrue(any("Deduped 1" in warning for warning in warnings))
 
     def test_project_string_target_normalizes(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             path_a = os.path.join(tmp, "A001_C001.mov")
             root = FolderStub("Master", clips=[ClipStub("A001_C001.mov", "clip-1", path_a)])
             records, target, warnings, err = _media_analysis_records_from_target(
@@ -3121,7 +3139,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
 
     def test_selected_string_target_normalizes(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             path_a = os.path.join(tmp, "A001_C001.mov")
             selected = ClipStub("A001_C001.mov", "clip-1", path_a)
             records, target, warnings, err = _media_analysis_records_from_target(
@@ -3136,7 +3154,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
 
     def test_clips_target_uses_explicit_clip_ids_and_rejects_non_analyzable(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             path_a = os.path.join(tmp, "A001_C001.mov")
             with open(path_a, "wb") as handle:
                 handle.write(b"placeholder")
@@ -3155,7 +3173,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertTrue(any("Skipping non-analyzable clip" in warning for warning in warnings))
 
     def test_sequence_target_collects_used_assets_and_occurrences(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             path_a = os.path.join(tmp, "A001_C001.mov")
             path_b = os.path.join(tmp, "A001_C002.wav")
             clip_a = ClipStub("A001_C001.mov", "clip-1", path_a)
@@ -3198,7 +3216,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
     def test_execute_standard_pipeline_with_synthetic_media(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "davinci-resolve-mcp-analysis")
             os.makedirs(source_dir)
@@ -3301,7 +3319,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
     def test_execute_session_pipeline_returns_reports_and_cleans_artifacts(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             session_root = os.path.join(tmp, "session-analysis")
             os.makedirs(source_dir)
@@ -3356,7 +3374,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
     def test_execute_emits_pending_host_analysis_when_vision_requested(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "davinci-resolve-mcp-analysis")
             os.makedirs(source_dir)
@@ -3411,7 +3429,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         The runner contract: same signature as before, return dict matches schema."""
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "davinci-resolve-mcp-analysis")
             os.makedirs(source_dir)
@@ -3513,7 +3531,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         from tests.test_analysis_store import make_report
         from src.utils import analysis_store, timeline_brain_db
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             os.makedirs(source_dir)
             source = os.path.join(source_dir, "sample clip.mp4")
@@ -3599,7 +3617,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         from tests.test_analysis_store import make_report
         from src.utils import timeline_brain_db
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             os.makedirs(source_dir)
             source = os.path.join(source_dir, "reuse clip.mp4")
@@ -3678,7 +3696,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                 prov.get("missing_reports") or [], key=lambda r: str(r.get("report_path")))
             return out
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             root = os.path.join(tmp, "analysis-root")
             os.makedirs(root)
             self.addCleanup(timeline_brain_db.close_all)
@@ -3724,7 +3742,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         from src.utils import analysis_store, timeline_brain_db
         from src.utils.media_analysis import summarize_reports
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             root = os.path.join(tmp, "analysis-root")
             os.makedirs(root)
             self.addCleanup(timeline_brain_db.close_all)
@@ -3748,7 +3766,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         from tests.test_analysis_store import make_report
         from src.utils.media_analysis import summarize_reports
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             root = os.path.join(tmp, "analysis-root")
             clip_dir = os.path.join(root, "clips", "legacy-clip")
             os.makedirs(clip_dir)
@@ -3759,7 +3777,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             self.assertEqual(summary["clip_reports"], 1)
 
     def test_build_analysis_index_queries_reports_without_image_columns(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             os.makedirs(source_dir)
             source = os.path.join(source_dir, "A001_C001.mov")
@@ -3917,7 +3935,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
                 conn.close()
 
     def test_query_analysis_index_reports_missing_index(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             root = resolve_output_root(
                 project_name="Example Project",
                 project_id="project-missing-index",
@@ -3944,7 +3962,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         """
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "analysis")
             os.makedirs(source_dir)
@@ -3991,7 +4009,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             self.assertEqual(final["pending_clips"], 0)
 
     def test_batch_job_runner_declines_a_finished_job(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             created = create_batch_job(
                 project_name="Runner Project",
                 project_id="project-runner-empty",
@@ -4011,7 +4029,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
     def test_batch_job_slice_runs_and_builds_index(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "analysis")
             os.makedirs(source_dir)
@@ -4084,7 +4102,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             "reason": "wall-clock timeout after 90s",
             "elapsed_ms": 90000,
         }
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "analysis")
             os.makedirs(source_dir)
@@ -4275,7 +4293,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
             }),
         ):
             with self.subTest(reason=reason):
-                with tempfile.TemporaryDirectory() as tmp:
+                with self._analysis_tmp() as tmp:
                     final = self._run_single_clip_batch_with_transcript(tmp, payload)
                 self.assertEqual(final["succeeded_clips"], 1)
                 self.assertEqual(final["failed_clips"], 0)
@@ -4286,7 +4304,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         """A backend that ran and broke is a real failure, status or not."""
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             final = self._run_single_clip_batch_with_transcript(tmp, {
                 "success": False,
                 "backend": "whisper_cli",
@@ -4300,7 +4318,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         """A caps refusal is a deliberate stop the caller has to be told about."""
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             final = self._run_single_clip_batch_with_transcript(tmp, {
                 "success": False,
                 "status": "caps_exhausted",
@@ -4311,7 +4329,7 @@ class MediaAnalysisPlanningTests(unittest.TestCase):
         self.assertTrue(final.get("last_error"))
 
     def test_batch_job_cancel_and_resume(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self._analysis_tmp() as tmp:
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "analysis")
             os.makedirs(source_dir)
@@ -4353,9 +4371,11 @@ class CleanupArtifactsTests(unittest.TestCase):
     def test_full_cleanup_releases_the_timeline_brain_connection(self):
         from src.utils import timeline_brain_db
 
-        self.addCleanup(timeline_brain_db.close_all)
         tmp = tempfile.mkdtemp(prefix="cleanup_artifacts_test_")
         self.addCleanup(shutil.rmtree, tmp, True)
+        # After the rmtree registration, so it runs first (LIFO): the test
+        # reopens the DB after cleanup, and Windows cannot remove an open file.
+        self.addCleanup(timeline_brain_db.close_all)
         project_root = os.path.join(tmp, "project-analysis")
         os.makedirs(project_root)
         db_path = timeline_brain_db.db_path_for_project(project_root)
@@ -4391,9 +4411,11 @@ class CleanupArtifactsTests(unittest.TestCase):
         fresh temp root, so a leak here accumulates across runs."""
         from src.utils import timeline_brain_db
 
-        self.addCleanup(timeline_brain_db.close_all)
         tmp = tempfile.mkdtemp(prefix="session_only_cleanup_test_")
         self.addCleanup(shutil.rmtree, tmp, True)
+        # After the rmtree registration, so it runs first (LIFO): the test
+        # reopens the DB after cleanup, and Windows cannot remove an open file.
+        self.addCleanup(timeline_brain_db.close_all)
         output_root = os.path.join(tmp, "davinci-resolve-mcp-analysis-session-abc")
         os.makedirs(output_root)
         db_path = timeline_brain_db.db_path_for_project(output_root)
@@ -5215,6 +5237,7 @@ class KillProcessTreeWindowsTests(unittest.TestCase):
             _kill_process_tree(12345)
         mock_run.assert_called_once_with(
             ["taskkill", "/F", "/T", "/PID", "12345"],
+            stdin=subprocess.DEVNULL,
             capture_output=True, check=False,
         )
 

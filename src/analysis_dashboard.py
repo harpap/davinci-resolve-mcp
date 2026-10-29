@@ -14738,6 +14738,7 @@ def _launch_claude_code_terminal() -> Dict[str, Any]:
     try:
         check = subprocess.run(
             ["osascript", "-e", 'application "iTerm" is running'],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=8,
         )
@@ -14762,6 +14763,7 @@ def _launch_claude_code_terminal() -> Dict[str, Any]:
     try:
         proc = subprocess.run(
             ["osascript", "-e", script],
+            stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=15,
         )
@@ -14794,6 +14796,7 @@ def _native_directory_picker(initial: Optional[str] = None) -> Dict[str, Any]:
             import subprocess
             proc = subprocess.run(
                 ["osascript", "-e", script],
+                stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=120,
             )
@@ -15022,7 +15025,15 @@ def _mcp_install_payload(client_id: str) -> Dict[str, Any]:
         )
     except Exception as exc:
         return {"success": False, "error": str(exc)}
-    return {"success": bool(ok), "message": message, "client_id": client_id}
+    # Same gap as install.py: writing the client entry does not install the
+    # Node packages the live subtitle preset path imports (issue #297).
+    node_deps = "not provisioned"
+    try:
+        project_dir = os.path.dirname(os.path.dirname(os.path.abspath(paths["server_path"])))
+        node_deps = installer.provision_advanced_node_deps(project_dir)
+    except Exception as exc:
+        node_deps = f"npm install failed: {exc}"
+    return {"success": bool(ok), "message": message, "client_id": client_id, "node_deps": node_deps}
 
 
 def _mcp_uninstall_payload(client_id: str) -> Dict[str, Any]:

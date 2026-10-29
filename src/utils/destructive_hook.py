@@ -109,7 +109,10 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
     "project_settings": frozenset({"delete_color_group"}),
     "render": frozenset({"delete_all_jobs", "delete_job", "delete_preset"}),
     "render_presets": frozenset({"delete_burnin"}),
-    "resolve_control": frozenset({"delete_user_preferences_preset"}),
+    # set_high_priority: an app-wide setting with no getter on any build, and
+    # irreversible for the session before 21.1 (issue #207). A write every gate
+    # must see, even though it touches no project content.
+    "resolve_control": frozenset({"delete_user_preferences_preset", "set_high_priority"}),
     "media_pool": frozenset({
         "delete_clips",
         "delete_folders",
@@ -123,6 +126,7 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
         "setup_multicam_timeline",
         "create_multicam_clip",
         "create_stereo_clip",
+        "import_bounded_media",
         "auto_sync_audio",
         "set_clip_marks",
         "clear_clip_marks",
@@ -142,6 +146,7 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
         "duplicate_clips",
         "copy_clips",
         "ripple_insert",
+        "replace_source_range",
         "copy_range",
         "duplicate_range",
         "overwrite_range",
@@ -186,9 +191,13 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
         "detect_scene_cuts",
         "analyze_dolby_vision",
         "create_subtitles",
+        "set_subtitle_preset",
     }),
     "timeline_item": frozenset({
         "delete_keyframe",
+        # Writes a nudged value and then the original back; a probe, but a
+        # write every gate must see.
+        "probe_keyframe_override",
         "set_output_blanking",
         "set_use_timeline_for_output_blanking",
         "set_clip_enabled",
@@ -366,7 +375,9 @@ NATIVE_DRY_RUN_ACTIONS: frozenset = frozenset({
     ("media_pool", "setup_multicam_timeline"),
     ("timeline", "apply_cuts"),
     ("timeline", "ripple_insert"),
+    ("timeline", "replace_source_range"),
     ("timeline_ai", "create_subtitles"),
+    ("timeline_ai", "set_subtitle_preset"),
     ("script_plugin", "safe_install_extension"),
     ("script_plugin", "safe_remove_extension"),
     ("project_manager", "safe_project_delete"),
@@ -1193,6 +1204,17 @@ def destructive_op(tool_name: str) -> Callable[[Callable[..., Any]], Callable[..
 
     def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
         def _inner(action: str, params: Optional[Dict[str, Any]] = None, *args, **kwargs) -> Any:
+            if (tool_name == "timeline_item" and action == "set_property"
+                    and (params or {}).get("track_type") == "subtitle"):
+                # This API rejects subtitle generators. Refuse before versioning
+                # so an impossible write cannot create an archived timeline.
+                return {
+                    "success": False,
+                    "error": "SetProperty is unsupported on subtitle items. For effects use live "
+                             "timeline_ai set_subtitle_preset with Resolve open. For caption text/timing "
+                             "use the live UI, or advanced project_db write_captions on a fully quit project.",
+                    "_versioning": {"archived": False, "skipped_reason": "unsupported_subtitle_property"},
+                }
             if lacks_native_dry_run(tool_name, action, params):
                 # An explicit dry-run request this handler would silently
                 # execute for real. Refuse before archive, state lookup, or the

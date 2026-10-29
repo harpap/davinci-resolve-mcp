@@ -469,7 +469,10 @@ def resolve_process_argv() -> List[str]:
     try:
         out = subprocess.run(["ps", "-Ao", "pid=,command="], capture_output=True, text=True, timeout=10)
         for line in out.stdout.splitlines():
-            if "DaVinci Resolve.app/Contents/MacOS/Resolve" in line:
+            if (
+                "DaVinci Resolve Studio.app/Contents/MacOS/Resolve" in line
+                or "DaVinci Resolve.app/Contents/MacOS/Resolve" in line
+            ):
                 return line.split()
     except Exception:
         pass

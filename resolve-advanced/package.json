@@ -15,36 +15,38 @@
   "files": [
     "server/**/*.mjs",
     "vendor/**",
+    "assets/**",
+    "!vendor/conform-qc/__fixtures__/**",
     "README.md",
     "LICENSE"
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "adm-zip": "^0.6.0",
-    "fast-xml-parser": "^5.11.1",
+    "fast-xml-parser": "^5.11.2",
     "fzstd": "^0.1.1",
-    "jszip": "^3.10.1",
-    "zod": "^4.5.4",
+    "jszip": "^3.10.2",
+    "zod": "^4.6.7",
     "zstd-codec": "^0.1.5"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.10.0",
     "js-yaml": "^4.3.2",
-    "pg": "^8.23.0",
+    "pg": "^8.23.1",
     "sharp": "^0.35.4"
   },
   "peerDependenciesMeta": {
     "_comment": "audio (split/trim/convert) + conform frame ops need system ffmpeg/ffprobe on PATH (NOT bundled \u2014 FFmpeg binaries are GPL; this package stays MIT). Install ffmpeg yourself: brew install ffmpeg."
   },
   "scripts": {
-    "test": "node --test vendor/drp-format/__tests__/*.test.js vendor/drt-format/__tests__/*.test.js vendor/drx-codec/__tests__/*.test.js test/*.test.mjs",
-    "test:libs": "node --test vendor/drp-format/__tests__/*.test.js vendor/drt-format/__tests__/*.test.js vendor/drx-codec/__tests__/*.test.js",
+    "test": "node --test vendor/drp-format/__tests__/*.test.js vendor/drt-format/__tests__/*.test.js vendor/drx-codec/__tests__/*.test.js vendor/conform-qc/test/*.test.js test/*.test.mjs",
+    "test:libs": "node --test vendor/drp-format/__tests__/*.test.js vendor/drt-format/__tests__/*.test.js vendor/drx-codec/__tests__/*.test.js vendor/conform-qc/test/*.test.js",
     "test:server": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=20.9"
   },
   "devDependencies": {
-    "prettier": "^3.9.4"
+    "prettier": "^3.9.10"
   }
 }

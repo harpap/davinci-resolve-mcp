@@ -112,3 +112,67 @@ test('back-compat: single footageDir still works', async () => {
   });
   assert.equal(r.mediaIndexed, 1);
 });
+
+function indexingFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'conform-index-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'turnover.xml');
+  fs.writeFileSync(filePath, XMEML);
+  return {
+    root,
+    call: (args) =>
+      conformTool.handler({
+        action: 'relink_scalefix',
+        args: { filePath, sequenceWidth: 3600, sequenceHeight: 2160, ...args },
+      }),
+  };
+}
+
+test('rejects injected find predicates without executing them', async (t) => {
+  const { root, call } = indexingFixture(t);
+  const marker = path.join(root, 'injected-marker');
+  await assert.rejects(call({ footageDirs: [root, '-exec', 'touch', marker, ';'] }), /invalid footage root/);
+  assert.equal(fs.existsSync(marker), false);
+  for (const predicate of ['-execdir', '-delete', '-fprintf']) {
+    await assert.rejects(call({ footageDir: predicate }), /invalid footage root/);
+  }
+});
+
+test('rejects empty, missing, non-directory, and non-string roots', async (t) => {
+  const { root, call } = indexingFixture(t);
+  const ordinaryFile = path.join(root, 'A001.mov');
+  fs.writeFileSync(ordinaryFile, '');
+  for (const invalidRoot of ['', path.join(root, 'missing'), ordinaryFile]) {
+    await assert.rejects(call({ footageDirs: [invalidRoot] }), /invalid footage root/);
+  }
+  await assert.rejects(call({ footageDirs: [] }), /provide footageDir/);
+  await assert.rejects(call({ footageDirs: [null] }), /string/);
+});
+
+test('indexes nested media literally, deduplicates roots, and avoids directory symlink cycles', async (t) => {
+  const { root, call } = indexingFixture(t);
+  const nested = path.join(root, 'Camera A');
+  fs.mkdirSync(nested);
+  const names = ['A001.MOV', 'A002.Mp4', 'A003\nsecond-line.mov', '-exec.mov'];
+  for (const name of names) fs.writeFileSync(path.join(nested, name), '');
+  fs.writeFileSync(path.join(nested, '._A001.mov'), '');
+  fs.writeFileSync(path.join(nested, 'camera-report.txt'), '');
+  fs.mkdirSync(path.join(nested, 'directory.mov'));
+  fs.symlinkSync(root, path.join(nested, 'cycle'));
+  fs.symlinkSync(path.join(nested, names[0]), path.join(nested, 'linked.mov'));
+  fs.mkdirSync(path.join(root, 'PROXY'));
+  fs.writeFileSync(path.join(root, 'PROXY', 'A004.mov'), '');
+  fs.mkdirSync(path.join(root, '._camera'));
+  fs.writeFileSync(path.join(root, '._camera', 'A005.mov'), '');
+  const r = await call({ footageDirs: [root, root, nested] });
+  assert.equal(r.mediaIndexed, names.length + 1);
+});
+
+test('accepts relative roots and custom exclusions', async (t) => {
+  const { root, call } = indexingFixture(t);
+  fs.mkdirSync(path.join(root, 'OFFLINE'));
+  fs.writeFileSync(path.join(root, 'OFFLINE', 'A001.mov'), '');
+  fs.writeFileSync(path.join(root, 'A002.mp4'), '');
+  const r = await call({ footageDir: path.relative(process.cwd(), root), indexExcludeMarkers: ['/OFFLINE/'] });
+  assert.equal(r.mediaIndexed, 1);
+});

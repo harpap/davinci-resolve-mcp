@@ -121,7 +121,9 @@ const CAMERA_ORIGINAL_RE = /^([A-Z]\d{3}[_ ]?[CR]\d{3,4}|[A-Z]\d{3}_\d{8}_C\d+|M
 /**
  * Dry-run rename plan (regex find/replace). REFUSES camera originals (sidecar/DB only).
  * @param {string[]} names basenames to rename
- * @param {{find:string, replace:string, allowCameraOriginals?:boolean, cameraOriginalRe?:RegExp}} rule
+ * @param {{find:string, replace:string, allowCameraOriginals?:boolean, cameraOriginalRe?:RegExp, caseSensitive?:boolean}} rule
+ *   caseSensitive defaults to false: macOS (APFS) and Windows volumes treat names that
+ *   differ only in case or Unicode normalization as one file, so those collide.
  */
 export function renamePlan(names, rule = {}) {
   let re;
@@ -133,28 +135,30 @@ export function renamePlan(names, rule = {}) {
   const camRe = rule.cameraOriginalRe || CAMERA_ORIGINAL_RE;
   const plan = [];
   const targets = new Map();
+  const caseSensitive = rule.caseSensitive === true;
+  const key = (n) => (caseSensitive ? n : n.normalize('NFC').toLowerCase());
+  // A name the plan leaves in place still occupies it — a refused camera original
+  // above all — so it counts as a target too, or a rename onto it reads as free.
   for (const name of names) {
     const isCam = camRe.test(name);
     if (isCam && !rule.allowCameraOriginals) {
       plan.push({ from: name, action: 'refuse-camera-original', note: 'camera original — rename via sidecar/DB only, never the file' });
+      targets.set(key(name), (targets.get(key(name)) || 0) + 1);
       continue;
     }
     const to = name.replace(re, rule.replace ?? '');
-    if (to === name) {
-      plan.push({ from: name, to, action: 'noop' });
-      continue;
-    }
-    targets.set(to, (targets.get(to) || 0) + 1);
-    plan.push({ from: name, to, action: 'rename' });
+    targets.set(key(to), (targets.get(key(to)) || 0) + 1);
+    plan.push({ from: name, to, action: to === name ? 'noop' : 'rename' });
   }
   // Flag collisions (two sources → one target).
-  for (const p of plan) if (p.action === 'rename' && targets.get(p.to) > 1) p.action = 'collision';
+  for (const p of plan) if (p.action === 'rename' && targets.get(key(p.to)) > 1) p.action = 'collision';
   const collisions = plan.filter((p) => p.action === 'collision');
   return {
     plan,
     renameCount: plan.filter((p) => p.action === 'rename').length,
     refused: plan.filter((p) => p.action === 'refuse-camera-original').length,
     collisions: collisions.length,
+    caseSensitive,
     dryRun: true,
   };
 }
@@ -168,7 +172,7 @@ export function reelNormalize(reels, opts = {}) {
     const to = String(r)
       .toUpperCase()
       .replace(/(\d+)\s*$/, (m) => m.padStart(pad, '0'));
-    if (to !== r) targets.set(to, (targets.get(to) || 0) + 1);
+    targets.set(to, (targets.get(to) || 0) + 1);
     plan.push({ from: r, to, action: to === r ? 'noop' : 'normalize' });
   }
   for (const p of plan) if (p.action === 'normalize' && targets.get(p.to) > 1) p.action = 'collision';

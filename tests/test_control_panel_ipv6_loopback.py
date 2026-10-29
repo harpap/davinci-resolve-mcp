@@ -13,12 +13,14 @@ import http.client
 import os
 import socket
 import tempfile
+import time
 import unittest
 from unittest import mock
 from urllib.parse import urlsplit
 
 import src.analysis_dashboard as dash
 from src import server
+from src.utils.proc import windows_pid_alive
 
 
 def _ipv6_loopback_port() -> int | None:
@@ -68,6 +70,13 @@ class ControlPanelIPv6Loopback(unittest.TestCase):
             os.kill(pid, 15)
         except OSError:
             pass
+        # On Windows os.kill is TerminateProcess, which returns before the
+        # child exits; until it does, it holds .control_panel.log open and the
+        # temp-dir cleanup fails with WinError 32.
+        if os.name == "nt":
+            deadline = time.monotonic() + 5
+            while windows_pid_alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
 
     def test_panel_serves_on_ipv6_loopback(self) -> None:
         result = self._launch()

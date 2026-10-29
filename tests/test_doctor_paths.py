@@ -116,7 +116,7 @@ class PlatformDefaultsTests(unittest.TestCase):
         with mock.patch.dict(
             doctor._RESOLVE_PATH_CANDIDATES["win32"], {"api": candidates}
         ), mock.patch.object(
-            doctor.Path, "exists", lambda self: str(self) == "/nope/present-api"
+            doctor.Path, "exists", lambda self: self.as_posix() == "/nope/present-api"
         ):
             self.assertEqual(doctor._resolve_default("api", "win32"), "/nope/present-api")
 

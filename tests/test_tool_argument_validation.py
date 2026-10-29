@@ -103,11 +103,14 @@ def _root_cause(exc: BaseException) -> BaseException:
 class ToolArgumentValidationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        # HOME is redirected before importing the server, so anything that writes
-        # state during the walk lands in a scratch dir and not the user's home.
-        cls._home = os.environ.get("HOME")
+        # The home dir is redirected before importing the server, so anything
+        # that writes state during the walk lands in a scratch dir and not the
+        # user's home. USERPROFILE too: it is what Path.home() reads on Windows,
+        # where HOME alone redirects nothing.
+        cls._home = {name: os.environ.get(name) for name in ("HOME", "USERPROFILE")}
         cls._sandbox = tempfile.mkdtemp(prefix="tool_walk_home_")
-        os.environ["HOME"] = cls._sandbox
+        for name in cls._home:
+            os.environ[name] = cls._sandbox
         cls._bridge = os.environ.pop("DAVINCI_RESOLVE_BRIDGE", None)
 
         from src import server
@@ -124,8 +127,11 @@ class ToolArgumentValidationTests(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.server.get_resolve = cls._real_get_resolve
         cls.server._launch_resolve = cls._real_launch
-        if cls._home is not None:
-            os.environ["HOME"] = cls._home
+        for name, value in cls._home.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         if cls._bridge is not None:
             os.environ["DAVINCI_RESOLVE_BRIDGE"] = cls._bridge
 

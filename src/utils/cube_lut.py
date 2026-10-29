@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import numpy as _np
@@ -54,6 +54,19 @@ class CubeLutError(Exception):
 def _require_numpy() -> None:
     if _np is None:
         raise CubeLutError("numpy is required for LUT arithmetic (pip install numpy)")
+
+
+def _header_floats(path: str, line_number: int, line: str, count: int) -> List[float]:
+    """The `count` numbers after a header keyword, or a CubeLutError naming the line."""
+    values = line.split()[1:count + 1]
+    try:
+        parsed = [float(value) for value in values]
+    except ValueError:
+        parsed = []
+    if len(parsed) != count:
+        keyword = line.split()[0]
+        raise CubeLutError(f"{path}:{line_number}: malformed {keyword} (expected {count} numbers)")
+    return parsed
 
 
 def read_cube(path: str) -> Dict[str, Any]:
@@ -100,10 +113,15 @@ def read_cube(path: str) -> Dict[str, Any]:
                 title = match.group(1) if match else ""
                 continue
             if upper.startswith("DOMAIN_MIN"):
-                domain_min = [float(value) for value in line.split()[1:4]]
+                domain_min = _header_floats(path, line_number, line, 3)
                 continue
             if upper.startswith("DOMAIN_MAX"):
-                domain_max = [float(value) for value in line.split()[1:4]]
+                domain_max = _header_floats(path, line_number, line, 3)
+                continue
+            if upper.startswith("LUT_3D_INPUT_RANGE"):
+                # Resolve's form of DOMAIN_MIN/MAX: one min and one max for all channels.
+                low, high = _header_floats(path, line_number, line, 2)
+                domain_min, domain_max = [low] * 3, [high] * 3
                 continue
             parts = line.split()
             if len(parts) != 3:

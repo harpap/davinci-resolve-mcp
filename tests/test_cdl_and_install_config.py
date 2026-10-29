@@ -18,6 +18,21 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.utils.cdl import normalize_cdl_payload
 
+# Expected values are built the way install.py builds them (``str(Path(...))``),
+# so they hold on Windows too, where ``str(Path("/tmp/python"))`` is
+# ``"\\tmp\\python"``. The inputs stay POSIX-shaped on purpose.
+TMP_PYTHON = str(Path("/tmp/python"))
+TMP_SERVER = str(Path("/tmp/server.py"))
+API_MODULES = str(Path("/Resolve/Scripting") / "Modules")
+
+
+def _is_node_command(command):
+    """Bare ``node``, or an absolute path to a node binary (``node.exe`` on Windows)."""
+    return command == "node" or (
+        os.path.isabs(command) and os.path.basename(command) in ("node", "node.exe")
+    )
+
+
 _spec = importlib.util.spec_from_file_location("resolve_install", INSTALL_PATH)
 install = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
@@ -81,14 +96,14 @@ class InstallConfigTests(unittest.TestCase):
                 system="Linux",
             )
 
-        self.assertEqual(entry["command"], "/tmp/python")
-        self.assertEqual(entry["args"], ["/tmp/server.py"])
+        self.assertEqual(entry["command"], TMP_PYTHON)
+        self.assertEqual(entry["args"], [TMP_SERVER])
         self.assertEqual(
             entry["env"],
             {
                 "RESOLVE_SCRIPT_API": "/Resolve/Scripting",
                 "RESOLVE_SCRIPT_LIB": "/Resolve/fusionscript.so",
-                "PYTHONPATH": "/Resolve/Scripting/Modules",
+                "PYTHONPATH": API_MODULES,
             },
         )
 
@@ -116,7 +131,7 @@ class InstallConfigTests(unittest.TestCase):
                 "RESOLVE_SCRIPT_LIB": "/Resolve/fusionscript.so",
                 "RESOLVE_SCRIPT_HOST": "resolve.example.test",
                 "RESOLVE_SCRIPT_TIMEOUT": "12.5",
-                "PYTHONPATH": "/Resolve/Scripting/Modules",
+                "PYTHONPATH": API_MODULES,
             },
         )
 
@@ -153,7 +168,8 @@ class InstallConfigTests(unittest.TestCase):
         )
         self.assertIn("native_import_attempted = True", captured["script"])
         self.assertIn("os._exit(0)", captured["script"])
-        self.assertIn(repo_root, captured["script"])
+        # install.py embeds the path with !r, so Windows backslashes appear doubled.
+        self.assertIn(repr(repo_root), captured["script"])
         # RESOLVE_SCRIPT_HOST propagated into the probe env by build_server_env.
         self.assertEqual(captured["env"].get("RESOLVE_SCRIPT_HOST"), "127.0.0.1")
         # Process timeout accommodates the configured network timeout (12.5 + 2).
@@ -219,7 +235,7 @@ class InstallConfigTests(unittest.TestCase):
 
         self.assertEqual(
             standard_json["mcpServers"]["davinci-resolve"]["env"]["PYTHONPATH"],
-            "/Resolve/Scripting/Modules",
+            API_MODULES,
         )
 
         # The advanced (Node) server pins AAF_PROBE_PYTHON to the venv interpreter so the
@@ -230,15 +246,43 @@ class InstallConfigTests(unittest.TestCase):
         # client config resolves against the launching GUI app's PATH, which
         # is how an nvm v18 ended up running a floor-20.9 server — measured).
         self.assertTrue(
-            advanced["command"] == "node" or advanced["command"].endswith("/node"),
+            _is_node_command(advanced["command"]),
             advanced["command"],
         )
-        self.assertEqual(advanced["env"]["AAF_PROBE_PYTHON"], "/tmp/python")
+        self.assertEqual(advanced["env"]["AAF_PROBE_PYTHON"], TMP_PYTHON)
+
+    def test_provision_skips_npm_when_deps_are_already_present(self):
+        server = self._bootable_tree()
+        root = server.parents[1]
+        with patch.object(install.subprocess, "run") as run:
+            status = install.provision_advanced_node_deps(root)
+        self.assertEqual(status, "already installed")
+        run.assert_not_called()
+
+    def test_provision_installs_missing_node_deps(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        advanced = root / "resolve-advanced"
+        (advanced / "server").mkdir(parents=True)
+        (advanced / "server" / "index.mjs").write_text("", encoding="utf-8")
+        (advanced / "package.json").write_text(
+            '{"dependencies": {"zod": "^3.0.0"}}', encoding="utf-8")
+
+        def fake_npm(argv, **kwargs):
+            (advanced / "node_modules" / "zod").mkdir(parents=True)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(install.subprocess, "run", side_effect=fake_npm) as run:
+            status = install.provision_advanced_node_deps(root)
+        self.assertEqual(status, "installed")
+        self.assertEqual(run.call_args.args[0][1:], ["install", "--omit=dev", "--omit=optional", "--no-audit", "--no-fund"])
+        self.assertEqual(run.call_args.kwargs["cwd"], str(advanced))
 
     def test_advanced_entry_omits_env_without_python_path(self):
         # No interpreter known → no AAF_PROBE_PYTHON pin (falls back to `python3` on PATH).
         entry = install.build_advanced_entry(self._bootable_tree())
-        self.assertTrue(entry["command"] == "node" or entry["command"].endswith("/node"), entry["command"])
+        self.assertTrue(_is_node_command(entry["command"]), entry["command"])
         self.assertNotIn("env", entry)
 
     def test_build_opencode_entry_uses_opencode_schema(self):
@@ -255,7 +299,7 @@ class InstallConfigTests(unittest.TestCase):
 
         self.assertEqual(entry["type"], "local")
         self.assertTrue(entry["enabled"])
-        self.assertEqual(entry["command"], ["/tmp/python", "/tmp/server.py"])
+        self.assertEqual(entry["command"], [TMP_PYTHON, TMP_SERVER])
         self.assertNotIn("args", entry)
         self.assertNotIn("env", entry)
         self.assertEqual(
@@ -263,7 +307,7 @@ class InstallConfigTests(unittest.TestCase):
             {
                 "RESOLVE_SCRIPT_API": "/Resolve/Scripting",
                 "RESOLVE_SCRIPT_LIB": "/Resolve/fusionscript.so",
-                "PYTHONPATH": "/Resolve/Scripting/Modules",
+                "PYTHONPATH": API_MODULES,
             },
         )
 
@@ -282,7 +326,7 @@ class InstallConfigTests(unittest.TestCase):
         self.assertIsNotNone(codex)
         self.assertEqual(codex["config_key"], "mcp_servers")
         self.assertEqual(codex["format"], "toml")
-        self.assertTrue(str(codex["get_path"]()).endswith(".codex/config.toml"))
+        self.assertEqual(Path(codex["get_path"]()).parts[-2:], (".codex", "config.toml"))
 
     def test_codex_path_honors_codex_home(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,10 +343,10 @@ class InstallConfigTests(unittest.TestCase):
         )
         parsed = _parse_toml(block)
         entry = parsed["mcp_servers"]["davinci-resolve"]
-        self.assertEqual(entry["command"], "/tmp/python")
-        self.assertEqual(entry["args"], ["/tmp/server.py"])
+        self.assertEqual(entry["command"], TMP_PYTHON)
+        self.assertEqual(entry["args"], [TMP_SERVER])
         self.assertEqual(entry["env"]["RESOLVE_SCRIPT_API"], "/Resolve/Scripting")
-        self.assertEqual(entry["env"]["PYTHONPATH"], "/Resolve/Scripting/Modules")
+        self.assertEqual(entry["env"]["PYTHONPATH"], API_MODULES)
 
     def test_build_codex_block_escapes_windows_paths(self):
         # Backslashes are escape characters in a TOML basic string: unescaped,
@@ -596,7 +640,7 @@ class ConfigMergeTests(unittest.TestCase):
             # The DaVinci entry uses OpenCode's schema, not the standard one.
             entry = result["mcp"]["davinci-resolve"]
             self.assertEqual(entry["type"], "local")
-            self.assertEqual(entry["command"], ["/tmp/python", "/tmp/server.py"])
+            self.assertEqual(entry["command"], [TMP_PYTHON, TMP_SERVER])
             self.assertIn("environment", entry)
             self.assertNotIn("env", entry)
 
@@ -627,8 +671,8 @@ class ConfigMergeTests(unittest.TestCase):
             self.assertTrue(success, message)
 
             entry = _parse_toml(config_path.read_text(encoding="utf-8"))["mcp_servers"]["davinci-resolve"]
-            self.assertEqual(entry["command"], "/tmp/python")
-            self.assertEqual(entry["args"], ["/tmp/server.py"])
+            self.assertEqual(entry["command"], TMP_PYTHON)
+            self.assertEqual(entry["args"], [TMP_SERVER])
 
     def test_codex_merge_keeps_other_settings_and_servers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -677,7 +721,7 @@ class ConfigMergeTests(unittest.TestCase):
             text = config_path.read_text(encoding="utf-8")
             parsed = _parse_toml(text)
             self.assertEqual(
-                parsed["mcp_servers"]["davinci-resolve"]["command"], "/tmp/python"
+                parsed["mcp_servers"]["davinci-resolve"]["command"], TMP_PYTHON
             )
             self.assertNotIn("/old/python", text)
             # The table after ours is untouched, not swallowed by the replacement.
@@ -744,7 +788,7 @@ class ConfigMergeTests(unittest.TestCase):
 
             text = config_path.read_text(encoding="utf-8")
             entry = _parse_toml(text)["mcp_servers"]["davinci-resolve"]
-            self.assertEqual(entry["command"], "/tmp/python")
+            self.assertEqual(entry["command"], TMP_PYTHON)
             self.assertEqual(entry["tools"]["timeline"]["approval_mode"], "approve")
             # env keeps its sub-table shape: TOML rejects a file that defines the
             # same key both as a sub-table and inline, so the rewrite must not
@@ -776,8 +820,8 @@ class ConfigMergeTests(unittest.TestCase):
 
             text = config_path.read_text(encoding="utf-8")
             entry = _parse_toml(text)["mcp_servers"]["davinci-resolve"]
-            self.assertEqual(entry["command"], "/tmp/python")
-            self.assertEqual(entry["args"], ["/tmp/server.py"])
+            self.assertEqual(entry["command"], TMP_PYTHON)
+            self.assertEqual(entry["args"], [TMP_SERVER])
             self.assertEqual(entry["startup_timeout_sec"], 120)
             self.assertEqual(entry["tool_timeout_sec"], 90)
             self.assertIn("# resolve can take a while to launch", text)

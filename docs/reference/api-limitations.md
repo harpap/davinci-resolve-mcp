@@ -12,7 +12,7 @@ that none exists).
 
 **Verified on:** DaVinci Resolve Studio 21.0.2
 
-**Totals:** 42 missing capabilities, 56 bugs / unreliable behaviors.
+**Totals:** 43 missing capabilities, 61 bugs / unreliable behaviors.
 
 The authoritative source is the runtime-queryable `api_truth` ledger
 (`resolve_control api_truth "<query>"`); this document is generated from
@@ -167,22 +167,22 @@ equivalent, blocking full automation.
 ### Per-subtitle text content and timing editing
 
 - **Object:** `TimelineItem (subtitle track)`
-- **Behavior:** TimelineItem on a subtitle track exposes only 21 standard transform/composite properties (Pan, Tilt, ZoomX, Opacity, Crop, etc.). There are no methods to get or set subtitle text (GetText/SetText), start time, end time, or duration for individual subtitle items. Subtitles created via CreateSubtitlesFromAudio or imported via the Resolve UI cannot have their content or timing read or modified programmatically. Verified via dir() and GetProperty() on Resolve 21.0.0.48.
-- **Workaround / current handling:** No workaround exists — subtitle text and timing are completely inaccessible from the scripting API. Must be edited in the Resolve UI.
+- **Behavior:** GetName, GetStart and GetEnd read caption names and bounds, and Timeline.DeleteClips can delete captions. There are no public methods to set caption text or per-word timings. Read-only live probe on Studio 21.1.0.17 (Windows, 2026-10-02): GetType=generator, GetProperty returned an empty dict, GetFusionCompCount=0, and dir() exposed no caption/text methods; the supplied reproduction also reports false GetProperty/SetProperty results. A subtitle SetProperty request must be refused before timeline auto-archiving. In the supplied 21.1 reproduction, UI text edits leave Name stale and move original AI words/times to protobuf f18/19/20; current f14/15/16 may contain invalid intervals. Whether a later save re-times them is not established here.
+- **Workaround / current handling:** Use advanced project_db list_captions / write_captions / check_captions on a local SQLite project with Resolve fully quit. Current text comes from f14, not stale Name. f15/16 and f19/20 use 60 ticks/sec; f21 is the original caption frame anchor. The tool returns timeline-frame times rebased to the item's current Start. Writes need explicit word times, preserve unknown fields, reject gaps/zero durations and re-index Items atomically, with backup and readback. This is an unsupported DB workaround; render/reopen validation of the implementation remains required before release.
 - **Tags:** missing-method, subtitle, text, timing
 
 ### Subtitle track styling and presets
 
 - **Object:** `TimelineItem / Timeline / Project`
-- **Behavior:** There is no API method to set or query subtitle font family, font size, text color, background color, outline, shadow, position, alignment, or to apply/query subtitle style presets. TimelineItem.GetProperty() on subtitle items returns only transform/composite keys. Timeline.GetSetting() and Project.GetSetting() return None for all probed subtitle-style keys (e.g. 'subtitleFontName', 'subtitleFontSize', 'subtitleTextColor', 'subtitleBackgroundColor', 'subtitlePosition', 'subtitleAlignment', 'subtitlePreset', 'subtitleStyle'). Verified via dir(), GetProperty(), and GetSetting() on Resolve 21.0.0.48.
-- **Workaround / current handling:** No API workaround exists, but the style IS reachable below the API: it lives in Sm2TiTrack.FieldsBlob for Type=2 tracks, as an EffectFiltersBA payload whose effect 136 carries a Qt QFont descriptor (param 18) and a normalised position vector (param 17). Exposed as project_db list_subtitle_styles / set_subtitle_style (font family/size/weight/italic + position). Confirmed live on BOTH editions 2026-08-06 — Studio 19.1.3 and free 21.0.3, identical behaviour: Resolve opens a patched track and re-serialises it back to its own zstd form with the patched values intact, so it genuinely parses the write. Caveats: whole-TRACK style not per-caption, project must be CLOSED, Resolve must be fully quit and relaunched afterwards, and the track must already carry a style blob (a freshly added subtitle track has none until it is styled once in the UI). Burn-in overlays via Fusion titles remain a visual alternative but do not produce subtitle tracks.
+- **Behavior:** There is no API method to set or query subtitle font family, font size, text color, background color, outline, shadow, position, alignment, or to apply/query subtitle style presets. Older probes returned only transform/composite keys; a read-only Studio 21.1.0.17 probe returned an empty dict. Timeline.GetSetting() and Project.GetSetting() return None for all probed subtitle-style keys (e.g. 'subtitleFontName', 'subtitleFontSize', 'subtitleTextColor', 'subtitleBackgroundColor', 'subtitlePosition', 'subtitleAlignment', 'subtitlePreset', 'subtitleStyle'). Verified via dir(), GetProperty(), and GetSetting() on Resolve 21.0.0.48.
+- **Workaround / current handling:** No API workaround exists, but the style IS reachable below the API: it lives in Sm2TiTrack.FieldsBlob for Type=2 tracks, as an EffectFiltersBA payload whose effect 136 carries a Qt QFont descriptor (param 18) and a normalised position vector (param 17). Exposed as project_db list_subtitle_styles / set_subtitle_style (font family/size/weight/italic + position). Confirmed live on BOTH editions 2026-08-06 — Studio 19.1.3 and free 21.0.3, identical behaviour: Resolve opens a patched track and re-serialises it back to its own zstd form with the patched values intact, so it genuinely parses the write. Caveats: whole-TRACK style not per-caption, project must be CLOSED, Resolve must be fully quit and relaunched afterwards, and the track must already carry a style blob (a freshly added subtitle track has none until it is styled once in the UI). Burn-in overlays via Fusion titles remain a visual alternative but do not produce subtitle tracks. Animated Word Highlight is DIFFERENT: list_subtitle_styles may report styled:false while an animation is present. Sm2TiItem_Sm2TiTrack links a Sm2TiVideoClip holder via FusionCompHolderItems to a Sm2TiCompositionTable. The supplied Studio 21.1.0.17 reproduction verified cloning these three rows; local read-only inspection corroborated the format. Use list_subtitle_presets / copy_subtitle_preset, or set_subtitle_preset for named Word Highlight inputs inside the nested zlib tool section. These new actions check that Resolve is fully quit BEFORE database writing. For live Word Highlight effects instead use timeline_ai set_subtitle_preset: native DRT export, patch the exported holder, and native import as a recoverable timeline revision. On Studio 21.1.0.17/Windows (2026-10-08), colour, size and position changed visibly without quitting Resolve; clip/caption bounds and media IDs matched the original. This does not add a native subtitle setter or establish other effects/builds. Holder Duration is preserved; its rendering semantics and per-caption preset layouts remain unverified.
 - **Tags:** missing-method, subtitle, style, preset
 
 ### Speech recognition engine selection and SRT import
 
 - **Object:** `Timeline`
-- **Behavior:** Timeline.CreateSubtitlesFromAudio(autoCaptionSettings) always uses the built-in Resolve speech recognition engine. There is no API parameter to select an alternative provider (e.g. whisper-cli, Google Speech, AWS Transcribe). The language selection via resolve.AUTO_CAPTION_LANGUAGE_* is the only customization; the engine itself cannot be changed. Furthermore, there is no API method to import an SRT file into a subtitle track programmatically — File -> Import -> Subtitle is UI-only.
-- **Workaround / current handling:** No workaround exists for provider selection or SRT import. External transcripts must be converted to SRT and imported through the Resolve UI.
+- **Behavior:** Timeline.CreateSubtitlesFromAudio(autoCaptionSettings) always uses the built-in Resolve speech recognition engine. There is no API parameter to select an alternative provider (e.g. whisper-cli, Google Speech, AWS Transcribe). The language selection via resolve.AUTO_CAPTION_LANGUAGE_* is the only customization; the engine itself cannot be changed. There is no dedicated subtitle import method. However, MediaPool.ImportMedia(srt) + AppendToTimeline was reported working on Studio 21.0.4.5 (issue #169). Whether that route carries word timing for animated presets on 21.1 has not been verified; SRT contains only cue timing.
+- **Workaround / current handling:** Use Resolve's engine for CreateSubtitlesFromAudio. For external SRT, test ImportMedia + AppendToTimeline on the exact installed build or import through the UI. Use project_db write_captions for explicit word timings with Resolve fully quit; do not assume SRT supplies them.
 - **Tags:** missing-method, subtitle, transcription, speech-recognition, asr
 
 ### Media Pool folder rename
@@ -288,13 +288,14 @@ equivalent, blocking full automation.
 - **Workaround / current handling:** Record interpolation choices in the caller; readback is not available at any version.
 - **Tags:** timeline, missing-method, readback, keyframes
 
-### Resolve.SetHighPriority (write-only, irreversible per session)
+### Resolve.SetHighPriority (write-only; irreversible before 21.1)
 
 - **Object:** `Resolve`
-- **Signature:** `() -> Bool`
-- **Behavior:** Raises the Resolve process priority; there is no getter and no way to lower it again through the API (confirmed absent from dir() on Studio 19.1.3.7).
-- **Workaround / current handling:** Call it only when the user asked for a long render on a dedicated machine; state cannot be read back or undone without restarting Resolve.
-- **Tags:** app-control, missing-method, readback
+- **Signature:** `() -> Bool  (19.x); (highPriority: bool) -> bool  (21.1 typed stub)`
+- **Behavior:** VERSION-SCOPED. On Studio 19.1.3.7 (measured here) the method takes no argument and raises priority; there is no getter and no way to lower it again through the API (no getter in dir()), so it is irreversible for the session. Resolve 21.1 retyped it SetHighPriority(highPriority: bool) -> bool, documented as 'script execution priority to high or normal'. Reported by @legionsound (issue #207) from Studio 21.1.0.14 on macOS, 2026-09-09; NOT reproduced here (no 21.1 install). One live session, in order: (False) -> True, (True) -> True, () -> False, (1) -> False, ('high') -> False, (False) -> True. So on 21.1 the no-argument call is a NO-OP that reports its own failure, only a real bool is accepted (1 and 'high' are rejected like the missing argument), and the setting is REVERSIBLE: SetHighPriority(False) restores normal. There is still no getter on any build — dir() on the live 21.1 Resolve object shows SetHighPriority as the only priority-related name — so the current state cannot be read back on either generation.
+- **Workaround / current handling:** On 21.1+ pass a real bool; never forward 1 or a string (coerce first — resolve_control set_high_priority and granular set_high_priority do, and refuse values that name no boolean). On older builds call it only when the user asked for a long scripted job on a dedicated machine: it cannot be lowered without restarting Resolve, which is why both tools refuse high=false there. No build offers readback, so report the native return, never a confirmed state.
+- **Reference:** [issue #207](https://github.com/samuelgursky/davinci-resolve-mcp/issues/207)
+- **Tags:** app-control, missing-method, readback, version-gated, reported
 
 ### TimelineItem.CreateMagicMask (needs operator clicks)
 
@@ -359,6 +360,13 @@ equivalent, blocking full automation.
 - **Behavior:** Resolve's FCP7 XML writer (measured on Studio 19.1.3.7, E107, verbatim export kept as a fixture) emits NO pproTicksIn/pproTicksOut on any clipitem — the Premiere tick fields a Premiere-shaped oracle treats as the authoritative source position are simply absent, so a reader that requires them derives no source frame for ANY cut of a Resolve export. Every clipitem edge that sits under a transitionitem is written as -1 and means the transition's junction (span center for alignment center; the writer emitted `center` for every dissolve and fade authored centered), `out - in` is the record duration, and a -1 START edge's <in> is the source at the overlap start. With three centered transitions two equal-length clips both carry -1/-1 edges, so a reader must pair junctions in record order — the first pair that fits places both clips at the same position. Black legs are Solid Color generatoritems whose -1 edge resolves the same way.
 - **Workaround / current handling:** Read <in> as the literal source frame (Resolve reads and writes it that way), record-align it by the junction-minus-span-start offset on a -1 start, and walk -1/-1 clips with a record-order cursor. conform.snapshot ingest_xml and editorial.parse_interchange both do; the frame QC then samples each cut CLEAR of its transition windows (inside one the reference is a blend, or black for a fade).
 - **Tags:** timeline, export, xml, fcp7, transitions, silent-failure
+
+### Timeline slip / trim of an existing item (no API on 19.x)
+
+- **Object:** `Timeline`
+- **Behavior:** There is no call to slip an item's source range or trim its edges in place: no SetProperty key moves the source in-point and no Timeline method takes a new range. The only route is to delete the item and append the new range at the same record frame, which loses its grade, transform, crop and composite unless they are carried over by hand. With a source rate different from the timeline's, the appended length can come out a frame off (the AppendToTimeline mixed-fps floor) and needed a corrected endFrame and a second append.
+- **Workaround / current handling:** timeline replace_source_range: append the new range on a temporary track at the same record frame, CopyGrades onto it, carry transform/crop/composite/scaling, delete the original, append the final copy on the original track, CopyGrades from the temporary copy, re-apply the properties, delete the temporary copy, restore the track lock. Start, end and duration are verified exactly; an endFrame that lands a frame off is corrected and retried.
+- **Tags:** missing-method, timeline, edit, mixed-fps
 
 ## Bugs / Unreliable Behavior (please fix)
 
@@ -796,6 +804,24 @@ values, or automation-hostile modal prompts.
 - **Workaround / current handling:** Any wrapper around ValidateDCTL must pass the native diagnostic through verbatim and must not reflow or rewrite the user's source to dodge it; ship the multi-line identity fixture as the known-good control. A 'no return value' error on a one-line function is this quirk, not a missing return — re-run the validation with the function laid out across lines before believing it. This server's own `dctl validate` is a static, offline check (entry point, brace balance, float suffixes) and does not call ValidateDCTL at all. The separate `dctl validate_native` and granular `validate_dctl_native` now expose the native validator without changing source or diagnostics. Both interfaces were contributor-validated against the three fixtures on Studio 21.1.0.14; see resolve211-dctl-validation.md.
 - **Tags:** dctl, validation, unreliable-return, version-gated, reported
 
+### Project.StartRendering
+
+- **Object:** `Project`
+- **Signature:** `(jobIds: list[str], isInteractiveMode=False) -> bool  (21.1 typed stub)`
+- **Behavior:** STATE-DEPENDENT RETURN. Reported by @legionsound (issue #207) from Studio 21.1.0.14 on macOS, 2026-09-09; NOT reproduced here (no 21.1 install). In one session, some freshly configured render jobs made StartRendering return False and remain Ready, while an identical job configured later in the same session started and completed. Official direct calls reproduced BOTH outcomes, so a False from one interface and a True from another in that sequence is not an interface difference. The trigger was not isolated; no root cause is established. The same session confirmed the two 21.1 RenderSettings keys the compound whitelist used to drop: UseUniqueFilenames=True gave queued filenames Resolve's '_V1-0001' suffix, and AudioFormat='wav' with LPCM produced complete 14-second stereo 48 kHz 24-bit WAVs whose decoded PCM matched byte for byte across both community interfaces.
+- **Workaround / current handling:** Treat the boolean as a hint in both directions. After start, read render(action='get_job_status') and render(action='verify_output') for the actual output file before reporting a render as running or done; a False with the job still Ready means nothing rendered. Do not auto-retry in a wrapper: the measured later success was a NEW identical job, not a retry of the same one, so a loop would hide the state it depends on. Surface the False and let the caller decide whether to re-queue.
+- **Reference:** [issue #207](https://github.com/samuelgursky/davinci-resolve-mcp/issues/207)
+- **Tags:** render, unreliable-return, state-dependent, version-gated, reported
+
+### Project settings presets mutated before the project's first SaveProject
+
+- **Object:** `Project`
+- **Signature:** `SaveCurrentProjectSettingsAsNewPreset / UpdateProjectSettingsPreset / SetProjectSettingsPreset / DeleteProjectSettingsPreset (presetName) -> bool  (21.1+)`
+- **Behavior:** DESTROYS THE PROJECT ITSELF, NOT A GRADE, AND REPORTS SUCCESS THROUGHOUT. Reported by @legionsound (issue #207) from Studio 21.1.0.14 on macOS, 2026-09-09; NOT reproduced here (no 21.1 install). On a NEW project that had never been saved: save a project-settings preset (SaveCurrentProjectSettingsAsNewPreset), change the timeline resolution, then update (UpdateProjectSettingsPreset), apply (SetProjectSettingsPreset) and delete (DeleteProjectSettingsPreset) the preset, then SaveProject and close. Every native call returned True. SQLite PRAGMA integrity_check on the project database still reported ok, but its Sm2MultiSysData table had ZERO rows, and LoadProject then failed with 'DaVinci Resolve failed to open project.' Reproduced twice, through community wrappers and through direct native calls. The control — the same sequence with one explicit SaveProject BEFORE any preset mutation — kept its Sm2MultiSysData row and reopened. Which single call in the sequence is responsible was not isolated, and preset Export/Import were not part of it, so do not assume any preset write is safe on an unsaved project. ProjectManager.GetProjectLastModifiedTime cannot serve as a 'has this project been saved' guard: it returned None even for saved projects on the same build.
+- **Workaround / current handling:** Before ANY project-settings-preset write on 21.1, call ProjectManager.SaveProject() on the current project and require it to return True; never mutate presets on a project created in this session that has not been saved. Do not read the True returns, a clean integrity_check, or the absence of an error as evidence the project survived — the only proof is closing it and reloading it. A wrapper must not save silently on the caller's behalf (the first save is the caller's decision), so it should require an explicit assertion that the project has been saved, and refuse without one. If the project already holds work, back it up (export a .drp) before the first preset write.
+- **Reference:** [issue #207](https://github.com/samuelgursky/davinci-resolve-mcp/issues/207)
+- **Tags:** destructive, unrecoverable, project, order-dependent, silent-failure, unreliable-return, version-gated, reported
+
 ### TimelineItem.ExportLUT
 
 - **Object:** `TimelineItem`
@@ -811,3 +837,27 @@ values, or automation-hostile modal prompts.
 - **Behavior:** No scriptable call produces an archive. With source media and proxies off it returns False instantly and writes nothing, for an open or a closed project and with render cache on or off. With isArchiveSrcMedia or isArchiveProxyMedia on it creates an empty directory at the target and Resolve crashes (SIGSEGV) in the same second; the call comes back through the bridge as None and every later handle is dead. Four crashes, one of them in a Blackmagic Cloud library, share identical top stack frames in Fusion script-symbol teardown on the UI thread; a separate crash in the same session during DeleteProject/LoadProject had a different stack, so the signature belongs to the archive calls. Media-flag calls crashed 4 of 4, flags-off calls 0 of 5. A file already at the target survived every case byte for byte, including a crash, so the destination is never overwritten; unsaved work in the open project is what is lost. The native defaults turn source media on, so a default call crashes Resolve. Resolve logs nothing about the False returns.
 - **Workaround / current handling:** Keep isArchiveSrcMedia and isArchiveProxyMedia off unless you have verified the build, and save every open project first. Treat False as 'nothing archived', not as a path problem: a .dra and a folder-style path fail identically. Archive from the Project Manager UI when you need a real archive.
 - **Tags:** crash, unreliable-return, silent-failure, project, reported
+
+### TimelineItem.SetProperty (Inspector-keyframed property)
+
+- **Object:** `TimelineItem`
+- **Signature:** `(propertyKey, propertyValue) -> Bool`
+- **Behavior:** On a clip that carries Edit-page (Inspector) keyframes for a transform property, as clips from an AAF import can, SetProperty('ZoomX', v) returns True and GetProperty reads v back, but the rendered frame never changes: the keyframes win at render time. Nothing in the return or the readback says so. On 19.x it cannot be detected or fixed from the API either: dir() of a live TimelineItem lists no keyframe methods (GetKeyframeCount, AddKeyframe and the rest are absent, and not in the scripting README), so the attribute is None and a call dies as "'NoneType' object is not callable".
+- **Workaround / current handling:** Prove a transform with frames, never with the return or the readback. timeline_item probe_keyframe_override exports the frame twice (null control), nudges the property, exports again and restores it; verdict 'override' means keyframes are winning. Then remove them in the Inspector, or rebuild the item from the Media Pool (timeline replace_source_range re-appends it; a fresh append should carry no Inspector keyframes, which is not yet verified by render). The timeline_item keyframe actions return KEYFRAME_API_UNAVAILABLE on builds without the methods.
+- **Tags:** silent-failure, unreliable-return, keyframes, transform, timeline, missing-method
+
+### Timeline.DeleteClips (locked track)
+
+- **Object:** `Timeline`
+- **Signature:** `([TimelineItem], ripple) -> bool`
+- **Behavior:** On a locked track DeleteClips returns a bare False and deletes nothing, with nothing to say the lock is why. The lock does not stop SetProperty: transform and other property writes on items of the same locked track still succeed, so a property edit that worked is no evidence the track is unlocked. Separate from the Edit-page gate in 'Timeline.DeleteClips (requires the Edit page; flaky first attempt)'.
+- **Workaround / current handling:** Read Timeline.GetIsTrackLocked for every track the targets sit on before deleting. timeline delete_clips refuses with TRACK_LOCKED naming the tracks; replace_source_range unlocks only with unlock_track=true and locks the track again afterwards; media_pool append_to_timeline names locked target tracks in its failure.
+- **Tags:** silent-failure, timeline, edit, track-lock
+
+### Resolve.OpenPage (during playback)
+
+- **Object:** `Resolve`
+- **Signature:** `(pageName) -> Bool`
+- **Behavior:** With playback engaged, a visit to the Color page followed by a page/playhead restore (resolve_control restore_state) timed out, and from then on EVERY scripting call hung, including a brand-new scriptapp() connection: Resolve's main thread was stuck in a viewer render loop until playback was dealt with in the GUI. The 19.x scripting API has no transport control (no Play, Stop or IsPlaying), so a script can neither stop playback first nor ask whether it is running.
+- **Workaround / current handling:** Detect playback by reading Timeline.GetCurrentTimecode twice ~0.2 s apart; a playhead that moved means the transport is running. resolve_control open_page / restore_state, gallery_stills grab_and_export and the page-switching timeline_frame routes refuse with PLAYBACK_ACTIVE (allow_during_playback=true overrides). Stop playback in the GUI (Space or K) before retrying.
+- **Tags:** hang, page-dependent, playback, missing-method

@@ -14,7 +14,6 @@ No Resolve required.
 from __future__ import annotations
 
 import io
-import signal
 import subprocess
 import sys
 import time
@@ -125,7 +124,7 @@ class RealChildTests(unittest.TestCase):
         def cleanup():
             for proc in spawned:
                 try:
-                    proc.send_signal(signal.SIGKILL)
+                    proc.kill()
                     proc.wait(timeout=5)
                 except Exception:
                     pass

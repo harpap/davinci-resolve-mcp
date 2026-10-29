@@ -83,13 +83,19 @@ def _wrap(text: str, max_chars: int, max_lines: int) -> Optional[List[str]]:
     return lines if len(lines) <= max_lines else None
 
 
-def _no_orphan(lines: List[str]) -> List[str]:
-    """Rebalance so no line is a lone word when a neighbour could give one up."""
+def _no_orphan(lines: List[str], max_chars: int) -> List[str]:
+    """Rebalance so no line is a lone word when a neighbour could give one up.
+
+    It cannot when the merged line would break the character cap `_wrap` has
+    just enforced; an orphan is the lesser of the two faults.
+    """
     if len(lines) < 2:
         return lines
     if len(lines[-1].split()) == 1 and len(lines[-2].split()) > 2:
         head = lines[-2].split()
-        lines = lines[:-2] + [" ".join(head[:-1]), f"{head[-1]} {lines[-1]}"]
+        merged = f"{head[-1]} {lines[-1]}"
+        if len(merged) <= max_chars:
+            lines = lines[:-2] + [" ".join(head[:-1]), merged]
     return lines
 
 
@@ -147,7 +153,7 @@ def build_blocks(
                 _word_time(current[-1], "end_seconds", "end")
                 or _word_time(current[-1], "start_seconds", "start")
             ),
-            "lines": _no_orphan(lines),
+            "lines": _no_orphan(lines, max_chars_per_line),
             "word_count": len(current),
         })
         current.clear()

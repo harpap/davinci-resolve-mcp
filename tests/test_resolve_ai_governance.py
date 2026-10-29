@@ -4,6 +4,7 @@ import unittest
 
 from src.utils import resolve_ai_governance as G
 from src.utils import resolve_ai_ledger as L
+from src.utils import timeline_brain_db
 
 
 class GovernanceTierResolutionTest(unittest.TestCase):
@@ -27,10 +28,11 @@ class GovernanceTierResolutionTest(unittest.TestCase):
 class GovernanceCheckTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self.root = self._tmp.name
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     def _record_deblur(self, n, *, bytes_each=0, ms_each=0, session="s1"):
         for i in range(n):

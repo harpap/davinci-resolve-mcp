@@ -91,3 +91,17 @@ test('index re-exports the multi-format surface', () => {
   assert.equal(typeof drt.capabilityDomains.capabilitiesForFormat, 'function');
   assert.equal(typeof drt.schemaFingerprint.fingerprintFile, 'function');
 });
+
+test('retargetDRP moves the kept project.xml\'s <ProjectVersion> gate, not only its stamp', async () => {
+  // A real Resolve 21 DRP: full project.xml with the gate at 17.
+  const zip = new JSZip();
+  zip.file('project.xml', `${STAMP('21.0.3.0007', '17')}\n<SM_Project><FullProjectSentinel>keep</FullProjectSentinel><ProjectVersion>17</ProjectVersion></SM_Project>`);
+  zip.file('SeqContainer/uuid-1.xml', `${STAMP('21.0.3.0007', '17')}\n<Sm2SequenceContainer><Sm2TiVideoClip><MediaRef>m</MediaRef></Sm2TiVideoClip></Sm2SequenceContainer>`);
+  zip.file('MediaPool/Master/MpFolder.xml', `${STAMP('21.0.3.0007', '17')}\n<MpFolder/>`);
+  const out = await retargetDRP(await zip.generateAsync({ type: 'nodebuffer' }), 19);
+  const proj = await (await JSZip.loadAsync(out)).file('project.xml').async('string');
+  assert.ok(proj.includes('FullProjectSentinel'), 'project kept');
+  assert.ok(proj.includes('<ProjectVersion>14</ProjectVersion>'), 'gate moved to 14');
+  assert.ok(!proj.includes('<ProjectVersion>17</ProjectVersion>'), 'old gate gone');
+  assert.deepEqual(readVersionStamp(proj), { dbAppVer: '19.1.3.0007', dbPrjVer: '14' });
+});

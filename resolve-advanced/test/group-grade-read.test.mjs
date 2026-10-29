@@ -4,7 +4,7 @@
  * group-grade-calibration.test.mjs / drx-value-fidelity.test.mjs. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scaleParam, listGroupNames } from '../server/group-grade-read.mjs';
+import { scaleParam, listGroupNames, groupSegment, groupBodies } from '../server/group-grade-read.mjs';
 
 test('scaleParam matches DRX-VALUE-SCALING.md', () => {
   assert.equal(scaleParam('lift.r', 0.5), 0.25); // lift /2
@@ -23,4 +23,33 @@ test('listGroupNames pulls Sm2Group names, de-duped', () => {
     '<Element><Sm2Group><FieldsBlob/><Name>Host</Name></Sm2Group></Element></Sm2GroupList>',
   ].join('');
   assert.deepEqual(listGroupNames(xml), ['Host', 'Guest']);
+});
+
+test('group names are read and matched as text, not as their xml escaping', () => {
+  // project.xml stores `&` as `&amp;` (and `"` `<` `>` as entities; Studio 19.1.3.7
+  // leaves `'` bare). The listing reported `Night &amp; Day`, and a caller asking for
+  // `Night & Day` got "group not found". Both apostrophe spellings resolve.
+  const xml = [
+    '<Sm2GroupList><Element><Sm2Group><FieldsBlob/><Name>Night &amp; Day</Name><Body>aa</Body></Sm2Group></Element>',
+    "<Element><Sm2Group><FieldsBlob/><Name>Sam's</Name><Body>bb</Body></Sm2Group></Element>",
+    '<Element><Sm2Group><FieldsBlob/><Name>Ann&apos;s</Name><Body>cc</Body></Sm2Group></Element>',
+    // As Studio 19.1.3.7 exported a group named `Say "hi" <now>`.
+    '<Element><Sm2Group><FieldsBlob/><Name>Say &quot;hi&quot; &lt;now&gt;</Name><Body>dd</Body></Sm2Group></Element></Sm2GroupList>',
+  ].join('');
+  assert.deepEqual(listGroupNames(xml), ['Night & Day', "Sam's", "Ann's", 'Say "hi" <now>']);
+  assert.match(groupSegment(xml, 'Say "hi" <now>'), /<Body>dd<\/Body>/);
+  assert.match(groupSegment(xml, 'Night & Day'), /<Body>aa<\/Body>/);
+  assert.match(groupSegment(xml, "Sam's"), /<Body>bb<\/Body>/);
+  assert.match(groupSegment(xml, "Ann's"), /<Body>cc<\/Body>/);
+  assert.equal(groupSegment(xml, 'Night'), null);
+});
+
+test('groupSegment matches the group name, not an earlier element with the same name', () => {
+  const xml = [
+    '<Sm2Group><FieldsBlob/><Name>Host</Name><Body>11</Body></Sm2Group>',
+    '<Sm2MpVideoClip><Name>Guest</Name></Sm2MpVideoClip>',
+    '<Sm2Group><FieldsBlob/><Name>Guest</Name><Body>22</Body></Sm2Group>',
+  ].join('');
+  // The old lookup spanned from the first group to the second and returned both bodies.
+  assert.deepEqual(groupBodies(groupSegment(xml, 'Guest')), ['22']);
 });

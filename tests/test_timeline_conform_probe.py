@@ -1,6 +1,8 @@
+import itertools
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from src.server import (
     _build_relink_plan,
@@ -9,6 +11,11 @@ from src.server import (
     _detect_gaps_overlaps_from_snapshot,
     _detect_missing_media_from_snapshot,
     _export_timeline_checked,
+    _media_path_basename,
+    _media_path_is_foreign,
+    _media_path_volume_root,
+    _missing_media_diagnosis,
+    _sanitize_media_path,
     _source_ranges_from_snapshot,
     _timeline_conform_snapshot,
     _timeline_export_spec,
@@ -251,7 +258,10 @@ class TimelineConformProbeTest(unittest.TestCase):
             replacement.write_text("replacement", encoding="utf-8")
             missing_path = "/Volumes/EOS_DIGITAL/DCIM/104_PANA/P1047043.MOV"
             timeline = self._timeline(missing_path=missing_path)
-            plan = _build_relink_plan(timeline, {"search_roots": [tmp], "sanitized": True})
+            # A macOS card on macOS: pinned so Windows CI sees the same-OS case
+            # rather than a path another OS wrote.
+            with mock.patch("src.server._host_media_path_form", return_value="posix"):
+                plan = _build_relink_plan(timeline, {"search_roots": [tmp], "sanitized": True})
 
         self.assertTrue(plan["success"])
         self.assertTrue(plan["search_skipped"])
@@ -260,6 +270,176 @@ class TimelineConformProbeTest(unittest.TestCase):
         self.assertEqual(plan["diagnosis"]["primary_cause"], "volume_not_mounted")
         self.assertEqual(plan["diagnosis"]["missing_volumes"][0]["volume_root_sanitized"], "/Volumes/EOS_DIGITAL/...")
         self.assertNotIn(tmp, str(plan))
+
+
+class MediaPathFormTests(unittest.TestCase):
+    """Resolve stores a path the way the OS that wrote it gave it, and a project
+    moves between machines, so the path's own form decides, not `os.sep`.
+    Pure string handling: these run on every platform (#278)."""
+
+    def test_volume_root_follows_the_paths_own_form(self):
+        cases = {
+            "/Volumes/EOS_DIGITAL/DCIM/104_PANA/P1047043.MOV": "/Volumes/EOS_DIGITAL",
+            "/Users/editor/clip.mov": "/Users",
+            "E:\\DCIM\\104_PANA\\P1047043.MOV": "E:\\",
+            "e:/DCIM/P1047043.MOV": "e:\\",
+            "\\\\nas\\share\\cards\\P1047043.MOV": "\\\\nas\\share",
+            "clip.mov": None,
+        }
+        for path, root in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_media_path_volume_root(path), root)
+
+    def test_sanitizing_keeps_the_volume_and_hides_the_rest(self):
+        cases = {
+            "/Volumes/EOS_DIGITAL/DCIM/P1047043.MOV": "/Volumes/EOS_DIGITAL/.../P1047043.MOV",
+            "/Users/editor/clip.mov": "/.../clip.mov",
+            "E:\\DCIM\\104_PANA\\P1047043.MOV": "E:\\...\\P1047043.MOV",
+            "\\\\nas\\share\\cards\\P1047043.MOV": "\\\\nas\\share\\...\\P1047043.MOV",
+            "media\\clip.mov": ".../clip.mov",
+        }
+        for path, sanitized in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_sanitize_media_path(path), sanitized)
+        self.assertEqual(_sanitize_media_path("E:\\DCIM\\104_PANA", keep_filename=False), "E:\\...")
+        self.assertEqual(_sanitize_media_path("\\\\nas\\share", keep_filename=False), "\\\\nas\\share\\...")
+
+    def test_an_unplugged_windows_card_is_a_missing_volume(self):
+        rows = [{"file_path": "E:\\DCIM\\104_PANA\\P1047043.MOV", "media_pool_item_id": "mp1", "name": "P1047043.MOV"}]
+        with mock.patch("src.server._host_media_path_form", return_value="windows"), mock.patch(
+            "os.path.isdir", return_value=False
+        ):
+            diagnosis = _missing_media_diagnosis(rows)
+        self.assertEqual(diagnosis["primary_cause"], "volume_not_mounted")
+        self.assertEqual(diagnosis["missing_volumes"][0]["volume_root_sanitized"], "E:\\...")
+        self.assertFalse(diagnosis["missing_volumes"][0]["foreign_os_path"])
+        self.assertIn("E:\\...", diagnosis["recommended_next_step"])
+
+    def test_basename_follows_the_paths_own_form(self):
+        cases = {
+            "/Volumes/EOS_DIGITAL/DCIM/104_PANA/P1047043.MOV": "P1047043.MOV",
+            "E:\\DCIM\\104_PANA\\P1047043.MOV": "P1047043.MOV",
+            "e:/DCIM/P1047043.MOV": "P1047043.MOV",
+            "\\\\nas\\share\\cards\\P1047043.MOV": "P1047043.MOV",
+            "P1047043.MOV": "P1047043.MOV",
+            "": "",
+            None: "",
+        }
+        for path, basename in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(_media_path_basename(path), basename)
+
+    def test_foreign_means_a_rooted_path_in_the_other_oss_form(self):
+        cases = [
+            ("posix", "E:\\DCIM\\P1047043.MOV", True),
+            ("posix", "\\\\nas\\share\\P1047043.MOV", True),
+            ("posix", "/Volumes/EOS_DIGITAL/P1047043.MOV", False),
+            ("windows", "/Volumes/EOS_DIGITAL/P1047043.MOV", True),
+            ("windows", "E:\\DCIM\\P1047043.MOV", False),
+            ("windows", "\\\\nas\\share\\P1047043.MOV", False),
+            ("posix", "media/P1047043.MOV", False),
+            ("windows", "media\\P1047043.MOV", False),
+        ]
+        for host, path, foreign in cases:
+            with self.subTest(host=host, path=path):
+                with mock.patch("src.server._host_media_path_form", return_value=host):
+                    self.assertEqual(_media_path_is_foreign(path), foreign)
+
+
+class ForeignOsMediaPathTests(unittest.TestCase):
+    """A project moved between macOS and Windows keeps the paths the other OS
+    wrote. Their volumes can never be mounted here, so the diagnosis says so
+    and the relink plan searches approved roots instead of waiting for a mount.
+    The host OS is pinned, so every platform runs both directions (#278)."""
+
+    CASES = [
+        # (running OS, path the other OS wrote, its sanitized volume root)
+        ("posix", "E:\\DCIM\\104_PANA\\P1047043.MOV", "E:\\..."),
+        ("posix", "\\\\nas\\share\\cards\\P1047043.MOV", "\\\\nas\\share\\..."),
+        ("windows", "/Volumes/EOS_DIGITAL/DCIM/104_PANA/P1047043.MOV", "/Volumes/EOS_DIGITAL/..."),
+    ]
+
+    @staticmethod
+    def _timeline(*missing_paths):
+        items = [
+            TimelineItemStub(
+                f"clip{index}",
+                f"t{index}",
+                index * 10,
+                index * 10 + 5,
+                0,
+                "video",
+                1,
+                MediaPoolItemStub(f"clip{index}", f"mpi-{index}", path),
+            )
+            for index, path in enumerate(missing_paths)
+        ]
+        return TimelineStub({"video": {1: items}})
+
+    def test_diagnosis_reports_another_oss_volume_instead_of_asking_to_mount_it(self):
+        for host, path, root in self.CASES:
+            with self.subTest(host=host, path=path):
+                rows = [{"file_path": path, "media_pool_item_id": "mp1", "name": "P1047043.MOV"}]
+                with mock.patch("src.server._host_media_path_form", return_value=host), mock.patch(
+                    "os.path.isdir", return_value=False
+                ) as isdir:
+                    diagnosis = _missing_media_diagnosis(rows)
+
+                self.assertEqual(diagnosis["primary_cause"], "foreign_os_path")
+                volume = diagnosis["missing_volumes"][0]
+                self.assertEqual(volume["volume_root_sanitized"], root)
+                self.assertTrue(volume["foreign_os_path"])
+                self.assertFalse(volume["mounted"])
+                self.assertEqual(volume["sample_basenames"], ["P1047043.MOV"])
+                item = diagnosis["unique_media_pool_items"][0]
+                self.assertEqual(item["wanted_basename"], "P1047043.MOV")
+                self.assertTrue(item["foreign_os_path"])
+                self.assertTrue(all(folder["foreign_os_path"] for folder in diagnosis["missing_folders"]))
+                self.assertIn(root, diagnosis["recommended_next_step"])
+                self.assertIn("build_relink_plan", diagnosis["recommended_next_step"])
+                self.assertNotIn("Mount", diagnosis["recommended_next_step"])
+                # The other OS's names mean something else here; never probe them.
+                isdir.assert_not_called()
+
+    def test_relink_plan_searches_approved_roots_for_another_oss_paths(self):
+        # Clip names differ from the filename, so a match proves the path's own
+        # basename was searched for, sanitized report or not.
+        for (host, path, _root), sanitized in itertools.product(self.CASES, (True, False)):
+            with self.subTest(host=host, path=path, sanitized=sanitized):
+                with tempfile.TemporaryDirectory() as tmp:
+                    (Path(tmp) / "P1047043.MOV").write_text("replacement", encoding="utf-8")
+                    with mock.patch("src.server._host_media_path_form", return_value=host):
+                        plan = _build_relink_plan(
+                            self._timeline(path), {"search_roots": [tmp], "sanitized": sanitized}
+                        )
+
+                self.assertTrue(plan["success"])
+                self.assertNotIn("search_skipped", plan)
+                self.assertEqual(plan["diagnosis"]["primary_cause"], "foreign_os_path")
+                self.assertEqual(plan["candidate_count"], 1)
+                candidate = plan["candidates"][0]
+                self.assertEqual(candidate["wanted_basename"], "P1047043.MOV")
+                self.assertTrue(candidate["foreign_os_path"])
+                self.assertEqual(candidate["candidate_count"], 1)
+                if sanitized:
+                    self.assertNotIn(tmp, str(plan))
+
+    def test_a_same_os_unmounted_volume_still_holds_the_search(self):
+        same_os = "/Volumes/EOS_DIGITAL/DCIM/104_PANA/P1047043.MOV"
+        foreign = "E:\\DCIM\\104_PANA\\P1047044.MOV"
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "P1047044.MOV").write_text("replacement", encoding="utf-8")
+            with mock.patch("src.server._host_media_path_form", return_value="posix"):
+                plan = _build_relink_plan(self._timeline(same_os, foreign), {"search_roots": [tmp], "sanitized": True})
+
+        self.assertTrue(plan["search_skipped"])
+        self.assertEqual(plan["skip_reason"], "missing_source_volume_not_mounted")
+        diagnosis = plan["diagnosis"]
+        self.assertEqual(diagnosis["primary_cause"], "volume_not_mounted")
+        self.assertIn("Mount the missing volume(s): /Volumes/EOS_DIGITAL/...", diagnosis["recommended_next_step"])
+        self.assertIn("another operating system (E:\\...)", diagnosis["recommended_next_step"])
+        flags = {row["volume_root_sanitized"]: row["foreign_os_path"] for row in diagnosis["missing_volumes"]}
+        self.assertEqual(flags, {"/Volumes/EOS_DIGITAL/...": False, "E:\\...": True})
 
 
 if __name__ == "__main__":

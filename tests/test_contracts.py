@@ -1,5 +1,8 @@
 """Tests for the declarative parameter-contract validator and safe subprocess wrappers."""
+import os
 import subprocess
+import sys
+import tempfile
 import unittest
 
 from src.utils.contracts import validate
@@ -41,9 +44,12 @@ class ValidateTest(unittest.TestCase):
     def test_parent_dir_exists(self):
         err, _ = validate({"p": "/no/such/dir/x.png"}, {"p": {"type": str, "parent_dir_exists": True}})
         self.assertIn("target directory does not exist", err)
-        err2, clean = validate({"p": "/tmp/x.png"}, {"p": {"type": str, "parent_dir_exists": True}})
+        # The system temp dir, not a literal /tmp: on Windows "/tmp" names
+        # the drive-root tmp folder, which normally does not exist.
+        existing = os.path.join(tempfile.gettempdir(), "x.png")
+        err2, clean = validate({"p": existing}, {"p": {"type": str, "parent_dir_exists": True}})
         self.assertIsNone(err2)
-        self.assertEqual(clean["p"], "/tmp/x.png")
+        self.assertEqual(clean["p"], existing)
 
     def test_invariant(self):
         err, _ = validate(
@@ -66,14 +72,18 @@ class ValidateTest(unittest.TestCase):
 class SafeRunTest(unittest.TestCase):
     def test_safe_run_defaults_stdin_devnull(self):
         # echo via python; the point is stdin is DEVNULL and it doesn't hang/inherit.
-        r = proc.safe_run(["python3", "-c", "print('ok')"], capture_output=True, text=True, timeout=10)
+        # sys.executable, not "python3": Windows has no python3 on PATH (or only
+        # the Microsoft Store stub), and this is not a test of PATH lookup.
+        r = proc.safe_run([sys.executable, "-c", "print('ok')"], capture_output=True, text=True, timeout=10)
         self.assertEqual(r.returncode, 0)
         self.assertIn("ok", r.stdout)
 
     def test_safe_run_allows_input(self):
         # input= and stdin are mutually exclusive in subprocess; safe_run must
         # not inject DEVNULL when input is provided.
-        r = proc.safe_run(["cat"], input="hello", capture_output=True, text=True, timeout=10)
+        # A Python stand-in for `cat`, which Windows does not ship.
+        echo_stdin = [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
+        r = proc.safe_run(echo_stdin, input="hello", capture_output=True, text=True, timeout=10)
         self.assertEqual(r.stdout, "hello")
 
 

@@ -5,6 +5,8 @@ came back as a bare success:false with no reason; the real constant is
 EXPORT_EDL. Offline: the Resolve object is stubbed without the constant.
 """
 
+import os
+import tempfile
 import unittest
 
 import src.server as compound
@@ -32,7 +34,10 @@ class ExportTypeRefusalTest(unittest.TestCase):
 
     def test_unknown_constant_refuses_with_vocabulary(self):
         out = compound._export_timeline_checked(_Tl(), {
-            "path": "/tmp/x.edl", "require_temp_path": False, "export_type": "EXPORT_CMX_3600",
+            # The system temp dir: the export makedirs the folder first, and a
+            # literal /tmp would create a drive-root tmp folder on Windows.
+            "path": os.path.join(tempfile.gettempdir(), "x.edl"),
+            "require_temp_path": False, "export_type": "EXPORT_CMX_3600",
         })
         self.assertIn("error", out)
         msg = out["error"]["message"] if isinstance(out["error"], dict) else str(out["error"])

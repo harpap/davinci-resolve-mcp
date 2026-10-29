@@ -337,7 +337,10 @@ class UserTargetsTest(unittest.TestCase):
             user_targets_path("/repo", env={ENV_USER_TARGETS: "/custom/t.json"}),
             pathlib.Path("/custom/t.json"),
         )
-        self.assertTrue(str(user_targets_path("/repo", env={})).endswith("logs/delivery-targets.json"))
+        self.assertEqual(
+            user_targets_path("/repo", env={}),
+            pathlib.Path("/repo") / "logs" / "delivery-targets.json",
+        )
 
     def test_missing_file_yields_empty(self):
         self.assertEqual(load_user_targets("/nonexistent/targets.json"), {})

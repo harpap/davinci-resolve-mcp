@@ -3,6 +3,7 @@
 from src.granular.common import *  # noqa: F401,F403
 import os
 from src.utils import typed_api_search
+from src.utils.app_control import set_high_priority as set_resolve_high_priority
 
 resolve = ResolveProxy()
 
@@ -262,7 +263,7 @@ def export_layout_preset_tool(preset_name: str, export_path: str) -> Dict[str, A
 
 
 @mcp.tool()
-def import_layout_preset_tool(import_path: str, preset_name: str = None) -> Dict[str, Any]:
+def import_layout_preset_tool(import_path: str, preset_name: Optional[str] = None) -> Dict[str, Any]:
     """Import a layout preset from a file.
 
     Calls Resolve.ImportLayoutPreset() to import a preset from disk.
@@ -314,6 +315,28 @@ def disable_background_tasks_for_current_session() -> Dict[str, Any]:
         return missing
     resolve.DisableBackgroundTasksForCurrentResolveSession()
     return {"success": True}
+
+
+@mcp.tool()
+@granular_destructive_op()
+def set_high_priority(high: bool = True) -> Dict[str, Any]:
+    """Set Resolve's script execution priority to high or normal.
+
+    Granular counterpart of resolve_control set_high_priority. On Resolve
+    21.1+ this calls SetHighPriority(bool) and is reversible (high=False
+    restores normal; reported on Studio 21.1.0.14, where the old no-argument
+    call is a no-op that returns False). Older builds take no argument and can
+    only raise priority for the session, so high=False is refused there. No
+    build has a getter, so nothing is read back.
+
+    Args:
+        high: True for high priority (default), False for normal. "true"/"false"
+            strings are coerced; anything else is refused before the call.
+    """
+    resolve = get_resolve()
+    if resolve is None:
+        return {"error": "Not connected to DaVinci Resolve"}
+    return set_resolve_high_priority(resolve, high)
 
 
 @mcp.resource("resolve://app/state")
@@ -701,7 +724,7 @@ def delete_user_preferences_preset(preset_name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def import_user_preferences_preset(import_path: str, preset_name: str = None) -> Dict[str, Any]:
+def import_user_preferences_preset(import_path: str, preset_name: Optional[str] = None) -> Dict[str, Any]:
     """Import a user-preferences preset from a file (Resolve 21.0.4+).
 
     The imported preset is NOT auto-loaded; it takes its name from the file

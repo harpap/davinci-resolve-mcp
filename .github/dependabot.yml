@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /resolve-advanced
+    schedule:
+      interval: weekly
+    groups:
+      compatible-updates:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # v5 changes empty-input and YAML merge-key semantics used by spec-compile.
+      # Revisit with an explicit loader migration; see PR #307.
+      - dependency-name: js-yaml
+        versions:
+          - "5.x"
+      # Native major upgrades need a runtime-floor and database compatibility review.
+      # v13 requires Node >=22; this project supports Node >=20.9 (PR #310).
+      - dependency-name: better-sqlite3
+        update-types:
+          - version-update:semver-major

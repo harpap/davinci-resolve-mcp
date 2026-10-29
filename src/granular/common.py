@@ -19,6 +19,7 @@ for path in (SRC_DIR, PROJECT_DIR):
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from src.utils.mcp_error_flag import ErrorFlaggingFastMCP
 
 from src.utils.app_control import (
     get_app_state,
@@ -91,14 +92,14 @@ if not logging.getLogger().handlers:
         handlers=[logging.StreamHandler()],
     )
 
-VERSION = "4.8.26"
+VERSION = "4.16.0"
 logger = logging.getLogger("davinci-resolve-mcp")
 logger.info(f"Starting DaVinci Resolve MCP Server v{VERSION}")
 logger.info(f"Detected platform: {get_platform()}")
 logger.info(f"Using Resolve API path: {RESOLVE_API_PATH}")
 logger.info(f"Using Resolve library path: {RESOLVE_LIB_PATH}")
 
-mcp = FastMCP("DaVinciResolveMCP")
+mcp = ErrorFlaggingFastMCP("DaVinciResolveMCP")
 if hasattr(mcp, "_mcp_server"):
     mcp._mcp_server.version = VERSION
 
@@ -377,7 +378,10 @@ def _resolve_safe_dir(path):
         # silently into both, same as /var/folders (matches src/server.py).
         _is_sandbox = path.startswith(("/var/", "/private/var/", "/tmp/", "/private/tmp/")) or path in ("/tmp", "/private/tmp")
     elif platform.system() == "Linux":
-        _is_sandbox = path.startswith("/tmp") or path.startswith("/var/tmp")
+        # By segment, not by character prefix (matches src/server.py): a sibling
+        # of /tmp whose name merely begins with it — /tmpfiles, /tmp-scratch,
+        # /var/tmpdata — cleared `startswith("/tmp")` and was redirected.
+        _is_sandbox = path.startswith(("/tmp/", "/var/tmp/")) or path in ("/tmp", "/var/tmp")
     elif platform.system() == "Windows":
         try:
             _is_sandbox = os.path.commonpath([os.path.abspath(path), os.path.abspath(system_temp)]) == os.path.abspath(system_temp)
@@ -419,8 +423,9 @@ def _launch_resolve():
     """Launch DaVinci Resolve and wait for it to become available."""
     sys_name = platform.system().lower()
     if sys_name == "darwin":
-        app_path = "/Applications/DaVinci Resolve/DaVinci Resolve.app"
-        if not os.path.exists(app_path):
+        from src.utils.resolve_runtime import MACOS_RESOLVE_APPS
+        app_path = next((p for p in MACOS_RESOLVE_APPS if os.path.exists(p)), None)
+        if not app_path:
             return False
         subprocess.Popen(["open", app_path], stdin=subprocess.DEVNULL)
     elif sys_name == "windows":

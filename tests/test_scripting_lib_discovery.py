@@ -74,7 +74,7 @@ def _windows_install(root: str) -> str:
     return exe
 
 
-def _macos_install(root: str) -> str:
+def _macos_install(root: str, bundle_name: str = "DaVinci Resolve.app") -> str:
     """A Resolve.app laid out the way the installer build is. Returns the exe.
 
     Joined with "/" on every host, not os.sep: RESOLVE_PROCESS_PATTERNS matches
@@ -84,7 +84,7 @@ def _macos_install(root: str) -> str:
     Windows accepts forward slashes in filesystem calls, so the files below are
     still real on both.
     """
-    bundle = f"{root}/DaVinci Resolve.app"
+    bundle = f"{root}/{bundle_name}"
     macos = f"{bundle}/Contents/MacOS"
     fusion = f"{bundle}/Contents/Libraries/Fusion"
     os.makedirs(macos, exist_ok=True)
@@ -106,6 +106,20 @@ class RunningResolveLibTests(unittest.TestCase):
                     mock.patch.object(rr.subprocess, "run", return_value=_ps(f'"{exe}"  \n')):
                 found = rr.running_resolve_lib()
             self.assertEqual(found, os.path.join(os.path.dirname(exe), "fusionscript.dll"))
+
+    def test_mac_app_store_studio_bundle_is_recognized(self) -> None:
+        """Issue #299: `DaVinci Resolve Studio.app` does not end with
+        `DaVinci Resolve.app`, so the running-process lookup missed it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = _macos_install(tmp, "DaVinci Resolve Studio.app")
+            with mock.patch.object(rr.platform, "system", return_value="Darwin"), \
+                    mock.patch.object(rr.subprocess, "run", return_value=_ps(f"{exe}\n")):
+                found = rr.running_resolve_lib()
+            self.assertIsNotNone(found)
+            normalized = found.replace(os.sep, "/")
+            self.assertTrue(normalized.endswith(
+                "DaVinci Resolve Studio.app/Contents/Libraries/Fusion/fusionscript.so"
+            ))
 
     def test_macos_reads_through_the_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,14 +174,17 @@ class CandidateListTests(unittest.TestCase):
         self.assertTrue(all(c.endswith("fusionscript.dll") for c in candidates))
 
     def test_macos_covers_both_bundle_locations(self) -> None:
-        """The App Store build sits at /Applications/DaVinci Resolve.app, which
-        the platform default does not name."""
-        candidates = platform_utils._macos_lib_candidates()
-        self.assertIn(
-            "/Applications/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
-            [c.replace(os.sep, "/") for c in candidates],
+        """The free App Store build sits at /Applications/DaVinci Resolve.app,
+        and App Store Studio at /Applications/DaVinci Resolve Studio.app.
+        Neither is the platform default. Studio comes before the free app."""
+        candidates = [c.replace(os.sep, "/") for c in platform_utils._macos_lib_candidates()]
+        studio = "/Applications/DaVinci Resolve Studio.app/Contents/Libraries/Fusion/fusionscript.so"
+        free = "/Applications/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"
+        installer = (
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app"
+            "/Contents/Libraries/Fusion/fusionscript.so"
         )
-        self.assertEqual(len(candidates), 2)
+        self.assertEqual(candidates, [installer, studio, free])
 
     def test_linux_covers_the_shipped_opt_layouts(self) -> None:
         candidates = platform_utils._linux_lib_candidates()
@@ -247,6 +264,32 @@ class GetResolvePathsDiscoveryTests(unittest.TestCase):
             "/Contents/Libraries/Fusion/fusionscript.so",
         )
 
+    def test_a_missing_library_scripting_dir_uses_the_bundle_copy(self) -> None:
+        """Issue #299: App Store Studio never creates the /Library scripting dir."""
+        studio_api = (
+            "/Applications/DaVinci Resolve Studio.app/Contents/Resources/Developer/Scripting"
+        )
+        real_isdir = os.path.isdir
+
+        def isdir(path):
+            normalized = str(path).replace("\\", "/")
+            if normalized == studio_api:
+                return True
+            if "Developer/Scripting" in normalized:
+                return False
+            return real_isdir(path)
+
+        with mock.patch.object(platform_utils, "get_platform", return_value="darwin"), \
+                mock.patch.dict(os.environ, _env_without_overrides(), clear=True), \
+                mock.patch.object(platform_utils.os.path, "isdir", isdir), \
+                mock.patch.object(platform_utils, "discover_scripting_lib", return_value=None), \
+                _default_lib_absent():
+            paths = platform_utils.get_resolve_paths()
+        self.assertEqual(paths["api_path"].replace("\\", "/"), studio_api)
+        self.assertEqual(
+            paths["modules_path"].replace("\\", "/"), studio_api + "/Modules"
+        )
+
 
 class InstallerEnvTests(unittest.TestCase):
     def test_an_unfound_library_is_omitted_not_written_empty(self) -> None:
@@ -264,6 +307,37 @@ class InstallerEnvTests(unittest.TestCase):
             "/usr/bin/python3", "/api", "/Resolve/fusionscript.so", system="Darwin"
         )
         self.assertEqual(env["RESOLVE_SCRIPT_LIB"], "/Resolve/fusionscript.so")
+
+    def test_setup_finds_the_mac_app_store_studio_bundle(self) -> None:
+        """Issue #299: setup's literal table has to name Studio before discovery."""
+        studio = "/Applications/DaVinci Resolve Studio.app"
+        api = studio + "/Contents/Resources/Developer/Scripting"
+        lib = studio + "/Contents/Libraries/Fusion/fusionscript.so"
+        darwin = install.RESOLVE_PATHS["Darwin"]
+        self.assertEqual(
+            darwin["api"][0],
+            "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
+        )
+        self.assertLess(
+            darwin["lib"].index(
+                "/Applications/DaVinci Resolve/DaVinci Resolve.app"
+                "/Contents/Libraries/Fusion/fusionscript.so"
+            ),
+            darwin["lib"].index(lib),
+        )
+
+        def isdir(path):
+            return str(path).replace("\\", "/") == api
+
+        def isfile(path):
+            return str(path).replace("\\", "/") == lib
+
+        with mock.patch.object(install, "SYSTEM", "Darwin"), \
+                mock.patch.object(install.os.path, "isdir", isdir), \
+                mock.patch.object(install.os.path, "isfile", isfile):
+            found_api, found_lib = install.find_resolve_paths()
+        self.assertEqual(found_api, api)
+        self.assertEqual(found_lib, lib)
 
     def test_find_resolve_paths_falls_back_to_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

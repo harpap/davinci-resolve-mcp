@@ -110,6 +110,8 @@ class PlanSelectsTests(EditEngineBase):
     def test_clip_level_fallback_when_no_deep_fields(self) -> None:
         root2 = tempfile.mkdtemp(prefix="edit-engine-fallback-")
         self.addCleanup(shutil.rmtree, root2, True)
+        # setUp's close_all runs after this rmtree (LIFO), too late for Windows.
+        self.addCleanup(timeline_brain_db.close, root2)
         report = make_report()  # standard shots, no editorial groups
         analysis_store.ingest_report(root2, report, clip_dir="std-cccccccccccc")
         plan = edit_engine.plan_selects(root2, min_select_potential="medium")

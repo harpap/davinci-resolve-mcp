@@ -205,7 +205,9 @@ created, and render time against the active tier, and the AI-ops ledger
   identity, and Media Pool inventory.
 - **MCP** — server identity, detected Resolve scripting paths, transport
   status (with a start button for the networked mode), and per-client install
-  status with one-click install/repair for every supported harness.
+  status with one-click install/repair for every supported harness. That
+  install also provisions the `resolve-advanced` Node packages the live
+  subtitle preset path imports.
 - **Storage** — the analysis root, search index, and jobs database paths and
   sizes for the active project.
 - **Tools** — runtime helpers (ffprobe, ffmpeg, Whisper backends, OpenCV)

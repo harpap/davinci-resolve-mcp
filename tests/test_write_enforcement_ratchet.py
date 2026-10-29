@@ -185,7 +185,6 @@ UNRATED_WRITE_BACKLOG = frozenset({
     "resolve_control.restore_state",
     "resolve_control.save_state",
     "resolve_control.save_user_preferences_preset",
-    "resolve_control.set_high_priority",
     "resolve_control.set_keyframe_mode",
     "resolve_control.set_mcp_update_policy",
     "setup.clear",

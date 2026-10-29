@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -18,6 +19,17 @@ from pathlib import Path
 from src.utils import resolve_bridge as rb
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def _home_env() -> dict:
+    """The variables `Path.home()` reads, for tests that clear `os.environ`.
+
+    POSIX falls back to the password database when HOME is unset; Windows has
+    no fallback, so with USERPROFILE gone `Path.home()` and `expanduser()`
+    raise "Could not determine home directory".
+    """
+    names = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+    return {name: os.environ[name] for name in names if name in os.environ}
 
 
 def signed(token: str, *, timestamp: int, nonce: str, operation: str = "health", request_id: str = "1"):
@@ -140,6 +152,20 @@ class ConfigTests(unittest.TestCase):
 
     def test_a_valid_config_loads(self) -> None:
         self.assertEqual(rb.load_config(self._write(self.BASE))["port"], 49632)
+
+    def test_the_root_policies_reach_the_launcher(self) -> None:
+        """#326: the installer writes these; load_config used to drop them."""
+        config = rb.load_config(self._write({
+            **self.BASE, "allowed_media_roots": ["/media"], "allowed_output_roots": ["/renders"],
+        }))
+        self.assertEqual(config["allowed_media_roots"], ["/media"])
+        self.assertEqual(config["allowed_output_roots"], ["/renders"])
+        self.assertNotIn("allowed_media_roots", rb.load_config(self._write(self.BASE)))
+
+    def test_malformed_root_policies_are_refused(self) -> None:
+        for bad in ("/media", [""], [3]):
+            with self.subTest(roots=bad), self.assertRaises(rb.BridgeConfigError):
+                rb.load_config(self._write({**self.BASE, "allowed_media_roots": bad}))
 
     @unittest.skipIf(os.name == "nt", "POSIX permissions only")
     def test_a_world_readable_secret_is_refused(self) -> None:
@@ -698,7 +724,7 @@ class InstallerTargetTests(unittest.TestCase):
 
         with mock.patch.dict(
             os.environ,
-            {self.installer.ENV_CONFIG_PATH: "~/private/resolve-bridge.json"},
+            {self.installer.ENV_CONFIG_PATH: "~/private/resolve-bridge.json", **_home_env()},
             clear=True,
         ):
             self.assertEqual(
@@ -741,7 +767,7 @@ class InstallerTargetTests(unittest.TestCase):
         config = pathlib.Path(tempfile.mkdtemp(prefix="bridge_invalid_config_")) / "bridge.json"
         config.write_text("{not valid json", encoding="utf-8")
         with mock.patch.dict(
-            os.environ, {self.installer.ENV_CONFIG_PATH: str(config)}, clear=True
+            os.environ, {self.installer.ENV_CONFIG_PATH: str(config), **_home_env()}, clear=True
         ):
             result = self.installer.ensure_config(port=50125, rotate=False)
 
@@ -759,7 +785,7 @@ class InstallerTargetTests(unittest.TestCase):
         root = pathlib.Path(tempfile.mkdtemp(prefix="bridge_custom_config_"))
         config = root / "private config" / "bridge.json"
         target = root / "Fusion/Scripts/Utility"
-        env = {self.installer.ENV_CONFIG_PATH: str(config)}
+        env = {self.installer.ENV_CONFIG_PATH: str(config), **_home_env()}
         with mock.patch.dict(os.environ, env, clear=True), \
                 mock.patch.object(self.installer, "script_targets", return_value=[target]), \
                 mock.patch.object(self.installer, "python_preflight", return_value={"ok": True}), \
@@ -822,7 +848,8 @@ class InstallerTargetTests(unittest.TestCase):
         home = pathlib.Path(tempfile.mkdtemp(prefix="fake_home_"))
         container = home / "Library/Containers/com.blackmagic-design.DaVinciResolveLite"
         (container / "Data").mkdir(parents=True)  # container only; NO Fusion tree
-        with mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
             targets = self.installer.script_targets()
         expected = container / "Data" / self.installer._SCRIPTS_SUFFIX
         self.assertIn(expected, targets, f"container skipped because its tree is absent: {targets}")
@@ -841,7 +868,8 @@ class InstallerTargetTests(unittest.TestCase):
         home = pathlib.Path(tempfile.mkdtemp(prefix="fake_home_"))
         container = home / "Library/Containers/com.blackmagic-design.DaVinciResolveLite"
         (container / "Data").mkdir(parents=True)
-        with mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
             targets = self.installer.script_targets()
 
         documented = container / "Data" / self.installer._SCRIPTS_SUFFIX
@@ -863,7 +891,8 @@ class InstallerTargetTests(unittest.TestCase):
 
         home = pathlib.Path(tempfile.mkdtemp(prefix="fake_home_"))
         (home / self.installer._SANDBOX_FALLBACK_SUFFIX).mkdir(parents=True)
-        with mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
             targets = self.installer.script_targets()
         self.assertNotIn(
             home / self.installer._SANDBOX_FALLBACK_SUFFIX, targets,
@@ -926,12 +955,19 @@ class InstallerTargetTests(unittest.TestCase):
         from unittest import mock
 
         home = pathlib.Path(tempfile.mkdtemp(prefix="fake_home_"))
-        for name in ("com.blackmagic-design.BlackmagicRawPlayer", "com.blackmagic-design.IOXPC"):
+        names = (
+            "com.blackmagic-design.BlackmagicRawPlayer",
+            "com.blackmagic-design.BlackmagicRawSpeedTest",
+            "com.blackmagic-design.DiskSpeedTest",
+            "com.blackmagic-design.IOXPC",
+        )
+        for name in names:
             (home / "Library/Containers" / name / "Data").mkdir(parents=True)
-        with mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(pathlib.Path, "home", staticmethod(lambda: home)):
             targets = self.installer.script_targets()
         self.assertFalse(
-            [t for t in targets if "RawPlayer" in str(t) or "IOXPC" in str(t)],
+            [t for t in targets if any(name in str(t) for name in names)],
             f"a non-Resolve Blackmagic container was targeted: {targets}",
         )
 
@@ -1129,7 +1165,12 @@ class InstallerTargetTests(unittest.TestCase):
             (prefix / "lib").mkdir()
             (prefix / "lib" / "libpython3.13.dylib").write_bytes(b"")
             (prefix / "bin").mkdir()
-            (prefix / "bin" / "python3").symlink_to(prefix / "bin" / "gone")
+            try:
+                (prefix / "bin" / "python3").symlink_to(prefix / "bin" / "gone")
+            except OSError as exc:
+                # Windows needs Developer Mode or SeCreateSymbolicLinkPrivilege
+                # (WinError 1314); a dangling link cannot be made without one.
+                self.skipTest(f"symlink creation is unavailable: {exc}")
             home = self._python3_home_for(str(prefix))
 
         self.assertFalse(home["usable"])
@@ -1213,7 +1254,7 @@ class InstallerTargetTests(unittest.TestCase):
             self.assertNotIn("homebrew", str(root).lower())
             self.assertIn("Python.framework", str(root))
         self.assertNotIn("homebrew", str(self.installer._FALLBACK_PYTHON3).lower())
-        self.assertEqual(str(self.installer._FALLBACK_PYTHON3), "/usr/local/bin/python3")
+        self.assertEqual(self.installer._FALLBACK_PYTHON3.as_posix(), "/usr/local/bin/python3")
 
     def test_a_lua_canary_ships_with_every_probe(self) -> None:
         # Lua always enumerates, so the canary separates "Python not detected"
@@ -1382,6 +1423,14 @@ class InstallerTargetTests(unittest.TestCase):
         import pathlib
         import tempfile
 
+        if os.name == "nt":
+            # Windows ignores the read-only attribute on directories, so mode
+            # bits cannot make one unwritable. A regular file where the parent
+            # directory should be makes creating the target fail with OSError
+            # just the same, which is the failure install() has to survive.
+            blocker = pathlib.Path(tempfile.mkdtemp(prefix="readonly_")) / "not-a-directory"
+            blocker.write_bytes(b"")
+            return blocker / "Utility"
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             self.skipTest("root ignores mode bits, so nothing is unwritable")
         parent = pathlib.Path(tempfile.mkdtemp(prefix="readonly_"))
@@ -1658,6 +1707,36 @@ class ProxyTests(unittest.TestCase):
         )
         with self.assertRaises(self.rbc.BridgeUnavailable):
             self.rbc.BridgeProxy(dead, "resolve").GetProductName()
+
+    def _patched_transport(self):
+        return self.rbc.BridgeTransport(
+            {"host": "127.0.0.1", "port": 9, "token": TOKEN, "auth_clock_skew_seconds": 60},
+            timeout=1.0,
+        )
+
+    def test_a_connect_timeout_is_unavailable_not_a_dialog(self) -> None:
+        # Windows retries a refused loopback SYN for ~2 s, so a short timeout
+        # fires inside connect (#278). The kernel completes the handshake even
+        # while a modal dialog blocks Resolve, so a connect that times out means
+        # no bridge. Patched so Linux and macOS CI exercise the Windows timing.
+        import socket as _socket
+        from unittest import mock
+
+        with mock.patch("socket.create_connection", side_effect=_socket.timeout("timed out")):
+            with self.assertRaises(self.rbc.BridgeUnavailable):
+                self._patched_transport().request("health", {})
+
+    def test_a_timeout_after_connecting_still_reports_bridge_timeout(self) -> None:
+        import socket as _socket
+        from unittest import mock
+
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+        sock.makefile.return_value.readline.side_effect = _socket.timeout("timed out")
+        with mock.patch("socket.create_connection", return_value=sock):
+            with self.assertRaises(self.rbc.BridgeCallError) as ctx:
+                self._patched_transport().request("health", {})
+        self.assertEqual(ctx.exception.code, "bridge_timeout")
 
 
 class BridgeForceFlagTests(unittest.TestCase):
@@ -2390,10 +2469,12 @@ class ServerReachesTheBridgeTests(unittest.TestCase):
         — and a machine with both always got Studio."""
         from src.utils import resolve_runtime
 
-        self.assertIn("/Applications/DaVinci Resolve.app", resolve_runtime.MACOS_RESOLVE_APPS)
-        self.assertIn(
-            "/Applications/DaVinci Resolve/DaVinci Resolve.app", resolve_runtime.MACOS_RESOLVE_APPS
-        )
+        apps = resolve_runtime.MACOS_RESOLVE_APPS
+        installer = "/Applications/DaVinci Resolve/DaVinci Resolve.app"
+        studio = "/Applications/DaVinci Resolve Studio.app"
+        free = "/Applications/DaVinci Resolve.app"
+        self.assertLess(apps.index(installer), apps.index(studio))
+        self.assertLess(apps.index(studio), apps.index(free))
 
     def test_bridge_requested_reads_the_environment_at_call_time(self) -> None:
         from unittest import mock
@@ -2553,11 +2634,13 @@ class NeverLaunchARunningResolveTests(unittest.TestCase):
         from src.utils import resolve_runtime
 
         patterns = resolve_runtime.RESOLVE_PROCESS_PATTERNS
-        # The App Store build is `/Applications/DaVinci Resolve.app/...` and the
-        # installer build `/Applications/DaVinci Resolve/DaVinci Resolve.app/...`;
-        # one pattern has to match both, or the edition that is running is missed.
+        # The free App Store build is `/Applications/DaVinci Resolve.app/...`,
+        # App Store Studio is `/Applications/DaVinci Resolve Studio.app/...`,
+        # and the installer build is `/Applications/DaVinci Resolve/DaVinci
+        # Resolve.app/...`. Studio does not contain the free-app suffix.
         for command in (
             "/Applications/DaVinci Resolve.app/Contents/MacOS/Resolve",
+            "/Applications/DaVinci Resolve Studio.app/Contents/MacOS/Resolve",
             "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve",
         ):
             with self.subTest(command=command):
@@ -2679,6 +2762,93 @@ class NotConnectedMessageTests(unittest.TestCase):
             "these _err() messages assert a launch that no longer happens:\n  "
             + "\n  ".join(offenders),
         )
+
+
+class ScriptingPreferenceTests(unittest.TestCase):
+    """A refusal with the preference already Local is a restart, not a setting.
+
+    Observed on Studio 19.1.3: External scripting was Local, the listener was
+    bound on port 15000, every connection was refused, and the error sent the
+    user to Preferences to set what was already set. A relaunch fixed it.
+    """
+
+    def _server(self):
+        import importlib
+
+        return importlib.import_module("src.server")
+
+    def _config_dir(self, text):
+        import tempfile
+
+        directory = tempfile.mkdtemp()
+        if text is not None:
+            with open(os.path.join(directory, "config.dat"), "w", encoding="ascii") as handle:
+                handle.write(text)
+        return directory
+
+    def test_reads_local_from_config_dat(self) -> None:
+        from src.utils import resolve_runtime
+
+        directory = self._config_dir("Local.RemoteStream.Enable = 0\nSystem.Scripting.Mode = 1\n")
+        pref = resolve_runtime.scripting_preference({"BMD_RESOLVE_CONFIG_DIR": directory})
+        self.assertTrue(pref["local"])
+        self.assertEqual(pref["value"], "1")
+
+    def test_a_config_without_the_key_is_not_local(self) -> None:
+        """A fresh config has no key, and that instance is unreachable."""
+        from src.utils import resolve_runtime
+
+        directory = self._config_dir("Local.RemoteStream.Enable = 0\n")
+        pref = resolve_runtime.scripting_preference({"BMD_RESOLVE_CONFIG_DIR": directory})
+        self.assertIs(pref["local"], False)
+        self.assertIsNone(pref["value"])
+
+    def test_another_value_is_not_local(self) -> None:
+        from src.utils import resolve_runtime
+
+        directory = self._config_dir("System.Scripting.Mode = 0\n")
+        pref = resolve_runtime.scripting_preference({"BMD_RESOLVE_CONFIG_DIR": directory})
+        self.assertIs(pref["local"], False)
+
+    def test_no_file_is_unknown_not_false(self) -> None:
+        from src.utils import resolve_runtime
+
+        directory = self._config_dir(None)
+        pref = resolve_runtime.scripting_preference({"BMD_RESOLVE_CONFIG_DIR": directory})
+        self.assertIsNone(pref["local"])
+        self.assertIsNone(pref["path"])
+
+    def _error_with_preference(self, local):
+        from unittest import mock
+
+        server = self._server()
+        pref = {"path": "/x/config.dat", "value": "1" if local else None, "local": local}
+        with mock.patch.object(server, "resolve_is_running", return_value=True), \
+                mock.patch.object(server, "_bridge_requested", return_value=False), \
+                mock.patch.object(server._resolve_runtime, "scripting_preference",
+                                  return_value=pref):
+            return server._not_connected_error()["error"]
+
+    def test_preference_already_local_leads_with_a_restart(self) -> None:
+        error = self._error_with_preference(True)
+        self.assertEqual(error["code"], "SCRIPTING_UNAVAILABLE")
+        self.assertTrue(error["remediation"].startswith("Quit and relaunch DaVinci Resolve"))
+        self.assertIn("already set to Local", error["reason"])
+        self.assertNotIn("free edition refuses", error["reason"])
+        self.assertTrue(error["state"]["scripting_preference_local"])
+        self.assertFalse(error["retryable"])
+        # The other causes still follow, in case a restart does not do it.
+        self.assertIn("External scripting", error["remediation"])
+        self.assertIn("DAVINCI_RESOLVE_BRIDGE", error["remediation"])
+
+    def test_preference_not_local_or_unknown_does_not_suggest_a_restart(self) -> None:
+        for local in (False, None):
+            with self.subTest(local=local):
+                error = self._error_with_preference(local)
+                self.assertNotIn("relaunch", error["remediation"].lower())
+                self.assertTrue(error["remediation"].startswith(
+                    "On Studio: Preferences > General"))
+                self.assertIn("free edition refuses", error["reason"])
 
 
 class NotConnectedRetryabilityTests(unittest.TestCase):

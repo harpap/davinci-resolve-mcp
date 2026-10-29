@@ -3,15 +3,17 @@ import tempfile
 import unittest
 
 from src.utils import resolve_ai_ledger as L
+from src.utils import timeline_brain_db
 
 
 class LedgerRecordQueryTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self.root = self._tmp.name
-
-    def tearDown(self):
-        self._tmp.cleanup()
 
     def test_op_meta_classification(self):
         self.assertEqual(L.op_meta("remove_motion_blur")["op_class"], L.OP_CLASS_RENDER)

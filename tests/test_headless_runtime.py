@@ -45,6 +45,12 @@ class ProcessTableTests(unittest.TestCase):
     XPC = ("/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/XPCServices/"
            "IOXPC.xpc/Contents/MacOS/IOXPC")
 
+    def setUp(self):
+        # These fixtures model ps output, irrespective of the test host.
+        patcher = mock.patch.object(rr.platform, "system", return_value="Darwin")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_the_stock_macos_table_is_one_gui_instance(self) -> None:
         """The real table from the day of the report: pid 39560 at the stock path,
         its IOXPC helper beside it, argv identical to the executable."""
@@ -172,6 +178,15 @@ class RuntimeModeTests(unittest.TestCase):
         with mock.patch.object(rr.subprocess, "run", return_value=_ps(appstore)):
             self.assertTrue(rr.is_headless())
 
+    def test_mac_app_store_studio_counts_as_running(self) -> None:
+        """Issue #299: the Studio bundle name is not a suffix of the free one."""
+        studio = "/Applications/DaVinci Resolve Studio.app/Contents/MacOS/Resolve"
+        with mock.patch.object(rr.subprocess, "run", return_value=_ps(studio)):
+            mode = rr.runtime_mode()
+        self.assertTrue(mode["running"])
+        self.assertFalse(mode["headless"])
+        self.assertEqual(mode["instances"], 1)
+
     def test_a_mere_mention_of_the_path_is_not_an_instance(self) -> None:
         """A shell running a script that *names* Resolve is not Resolve.
 
@@ -262,7 +277,7 @@ class LaunchCommandTests(unittest.TestCase):
                 mock.patch.object(rr.os.path, "exists", return_value=True):
             command = rr.launch_command(headless=True)
         self.assertNotIn("open", command)
-        self.assertTrue(command[0].endswith("Contents/MacOS/Resolve"))
+        self.assertTrue(command[0].replace("\\", "/").endswith("Contents/MacOS/Resolve"))
         self.assertEqual(command[1], "-nogui")
 
     def test_the_gui_launch_still_goes_through_open(self) -> None:

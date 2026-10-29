@@ -113,14 +113,18 @@ class BoxDownscaleTest(unittest.TestCase):
 
 
 class CapturePreviewTest(unittest.TestCase):
-    def _capture(self, params, resolve=None, tl=None, proj=None):
+    def _capture(self, params, resolve=None, tl=None, proj=None, live_current=False):
         resolve = resolve or _FakeResolve(page="edit")
         tl = tl if tl is not None else _fake_timeline(resolve)
         proj = proj or mock.Mock()
         # quality="thumbnail" is this class's subject: the clip-thumbnail route.
         params = {"quality": "thumbnail", **params}
+        # live_current: `_get_tl` answers with whatever the project says is
+        # current, as Resolve does, so a pin made before the action is seen.
+        get_tl = (lambda: (proj, proj.GetCurrentTimeline(), None)) if live_current else (lambda: (proj, tl, None))
         with mock.patch.object(s, "get_resolve", return_value=resolve), \
-             mock.patch.object(s, "_get_tl", return_value=(proj, tl, None)):
+             mock.patch.object(s, "_check", return_value=(None, proj, None)), \
+             mock.patch.object(s, "_get_tl", side_effect=get_tl):
             return s.timeline_frame("capture", params), resolve, tl
 
     def test_returns_png_image_content(self):
@@ -194,7 +198,8 @@ class CapturePreviewTest(unittest.TestCase):
         active = {"tl": current}
         proj.GetCurrentTimeline.side_effect = lambda: active["tl"]
         proj.SetCurrentTimeline.side_effect = lambda tl: active.update(tl=tl) or True
-        out, _, _ = self._capture({"timeline_name": "Other"}, resolve=resolve, tl=current, proj=proj)
+        out, _, _ = self._capture({"timeline_name": "Other"}, resolve=resolve, tl=current, proj=proj,
+                                  live_current=True)
         self.assertIsInstance(out, Image)
         self.assertEqual(
             [c.args[0] for c in proj.SetCurrentTimeline.call_args_list],
@@ -296,7 +301,8 @@ class _RenderCapture:
                  write=True, ffmpeg="/usr/bin/ffmpeg", marks=None, mode=1, mode_switch=True,
                  resolve=None, range_restore_ok=True, user_target=USER_TARGET,
                  user_name="userA", target_restore_ok=True, job_delete_ok=True,
-                 existing=None):
+                 existing=None, render_formats=None, codecs_for=None,
+                 subtitle_tracks=0):
         """Returns (result, project mock, list of SetRenderSettings payloads)."""
         resolve = resolve or _FakeResolve(page="color")
         tl = _fake_timeline(resolve)
@@ -316,7 +322,14 @@ class _RenderCapture:
         proj.GetCurrentRenderMode.side_effect = _mode
         proj.SetCurrentRenderMode.return_value = mode_switch
         proj.GetCurrentRenderFormatAndCodec.return_value = {"format": "mov", "codec": "H.264"}
-        proj.GetRenderCodecs.return_value = {"JPEG": "YUV420_8"}
+        if render_formats is not None:
+            proj.GetRenderFormats.return_value = render_formats
+        if codecs_for is not None:
+            proj.GetRenderCodecs.side_effect = codecs_for
+        else:
+            proj.GetRenderCodecs.return_value = {"JPEG": "YUV420_8"}
+        if subtitle_tracks:
+            tl.GetTrackCount.side_effect = lambda kind: subtitle_tracks if kind == "subtitle" else 0
         proj.SetCurrentRenderFormatAndCodec.return_value = True
         proj.GetRenderJobStatus.return_value = (
             status if isinstance(status, dict) else {"JobStatus": status}
@@ -383,21 +396,25 @@ class _RenderCapture:
             os.makedirs(base, exist_ok=True)
             with open(os.path.join(base, filename), "wb") as fh:
                 fh.write(b"someone else's file")
+        # The render route is no longer the default (quality='frame' exports
+        # the viewer's frame); this fixture drives it by name.
+        params = {"quality": "render", **params}
         with mock.patch.object(s, "get_resolve", return_value=resolve), \
              mock.patch.object(s, "_get_tl", return_value=(proj, tl, None)), \
              mock.patch.object(s, "_resolve_safe_dir", return_value=base), \
              mock.patch.object(s.shutil, "which", return_value=ffmpeg), \
              mock.patch.object(s, "_ffmpeg_scale_to_bytes", return_value=(b"\xff\xd8scaled", None)), \
-             mock.patch.object(page_lock.time, "sleep"):
+             mock.patch.object(page_lock.time, "sleep"), \
+             mock.patch.object(s._playback_guard.time, "sleep"):
             out = s.timeline_frame("capture", params)
         return out, proj, calls
 
 
 class CaptureRenderTest(_RenderCapture, unittest.TestCase):
-    """quality='frame' — the default, and the only frame-accurate route."""
+    """quality='render' — the single-frame render, used only when asked for."""
 
-    def test_render_is_the_default_quality(self):
-        out, proj, _ = self._capture({})
+    def test_render_route_runs_when_asked_for_by_name(self):
+        out, proj, _ = self._capture({"quality": "render"})
         self.assertIsInstance(out, Image)
         proj.StartRendering.assert_called_once()
 
@@ -423,6 +440,30 @@ class CaptureRenderTest(_RenderCapture, unittest.TestCase):
         self.assertEqual(
             proj.SetCurrentRenderFormatAndCodec.call_args_list[-1].args,
             ("mov", "H.264"),
+        )
+
+    def test_render_format_restore_uses_codec_ids_not_descriptions(self):
+        # GetCurrentRenderFormatAndCodec reports the Deliver label. The setter
+        # refuses it: ('mp4', 'H.264') is False, ('mp4', 'H264') is True
+        # (api_truth, reconfirmed on 21.0.4). Issue #296 left the project on jpg.
+        def codecs(fmt):
+            if str(fmt).lower() in ("jpg", "jpeg"):
+                return {"JPEG": "YUV420_8"}
+            return {"H.264": "H264"}
+
+        out, proj, _ = self._capture(
+            {},
+            render_formats={"QuickTime": "mov", "JPEG": "jpg"},
+            codecs_for=codecs,
+        )
+        self.assertIsInstance(out, Image)
+        self.assertEqual(
+            proj.SetCurrentRenderFormatAndCodec.call_args_list[0].args,
+            ("jpg", "YUV420_8"),
+        )
+        self.assertEqual(
+            proj.SetCurrentRenderFormatAndCodec.call_args_list[-1].args,
+            ("mov", "H264"),
         )
 
     def test_individual_clips_mode_is_forced_to_single_clip_and_restored(self):
@@ -540,18 +581,6 @@ class CaptureRenderTest(_RenderCapture, unittest.TestCase):
         out, _, _ = self._capture({"max_width": 640}, ffmpeg=None)
         self.assertEqual(out["error"]["code"], "FFMPEG_REQUIRED")
 
-    def test_preview_alias_bounds_the_width(self):
-        # 'preview' from the issue's schema means a fast downscaled frame, not
-        # the clip thumbnail — it must still render, just bounded.
-        out, proj, _ = self._capture({"quality": "preview"})
-        self.assertIsInstance(out, Image)
-        proj.StartRendering.assert_called_once()
-        self.assertEqual(out.data, b"\xff\xd8scaled")
-
-    def test_full_alias_maps_to_the_render_route(self):
-        out, proj, _ = self._capture({"quality": "full"})
-        self.assertIsInstance(out, Image)
-        proj.StartRendering.assert_called_once()
 
 
 class CaptureRenderPageRestoreTest(_RenderCapture, unittest.TestCase):
@@ -707,20 +736,28 @@ class CaptureOutputSettingsTest(_RenderCapture, unittest.TestCase):
 
     def test_a_project_with_no_output_folder_still_captures(self):
         # AddRenderJob returns '' there, so there is nothing to read and
-        # nothing to put back. That is not a failed restore.
+        # nothing to put back. The capture folder stays: deleting the path
+        # Deliver is pointed at raises "Render Path Inaccessible".
         out, proj, calls = self._capture({"frame": 86424}, user_target=None)
-        self.assertIsInstance(out, Image)
+        self.assertIsInstance(out, list)
+        self.assertIsInstance(out[0], Image)
+        self.assertIn("Render Path Inaccessible", out[1]["warnings"][0])
+        staging = calls[0]["TargetDir"]
+        self.assertTrue(os.path.isdir(staging))
         self.assertEqual([c for c in calls if set(c) == {"TargetDir"}], [])
         self.assertEqual(proj.render_state["jobs"], {})
 
     def test_an_output_folder_that_is_not_put_back_is_reported(self):
         with mock.patch.object(s.logger, "warning"):
-            out, proj, _ = self._capture({"frame": 86424}, target_restore_ok=False)
+            out, proj, calls = self._capture({"frame": 86424}, target_restore_ok=False)
         self.assertIsInstance(out, list)
         self.assertIsInstance(out[0], Image)
         self.assertEqual(len(out[1]["warnings"]), 1)
         self.assertIn("output folder", out[1]["warnings"][0])
         self.assertIn(USER_TARGET, out[1]["warnings"][0])
+        self.assertIn("Render Path Inaccessible", out[1]["warnings"][0])
+        staging = [c["TargetDir"] for c in calls if "TargetDir" in c][0]
+        self.assertTrue(os.path.isdir(staging))
 
     def test_a_readback_job_that_cannot_be_removed_is_reported(self):
         with mock.patch.object(s.logger, "warning"):
@@ -797,6 +834,13 @@ class CaptureTeardownReportTest(_RenderCapture, unittest.TestCase):
     def test_teardown_is_empty_for_a_clean_capture(self):
         out, _, _ = self._capture({})
         self.assertIsInstance(out, Image)
+
+    def test_a_subtitle_track_is_named_as_not_in_the_still(self):
+        out, _, _ = self._capture({}, subtitle_tracks=1)
+        self.assertIsInstance(out, list)
+        self.assertIsInstance(out[0], Image)
+        self.assertIn("subtitle track", out[1]["warnings"][0])
+        self.assertIn("ExportSubtitle", out[1]["warnings"][0])
 
 
 class ToolSurfaceTest(unittest.TestCase):

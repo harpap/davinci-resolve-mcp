@@ -90,6 +90,12 @@ class BlockRuleTests(unittest.TestCase):
             if len(block["lines"]) > 1 and len(" ".join(block["lines"]).split()) > 3:
                 self.assertGreater(len(block["lines"][-1].split()), 1, block)
 
+    def test_the_orphan_rebalance_keeps_the_character_cap(self) -> None:
+        blocks = captions.build_blocks(speak("we had a wonderful conversation"), max_chars_per_line=20)
+        for block in blocks:
+            for line in block["lines"]:
+                self.assertLessEqual(len(line), 20, line)
+
     def test_untimed_and_empty_words_are_skipped(self) -> None:
         words = [{"word": "hello", "start_seconds": 0.0, "end_seconds": 0.4},
                  {"word": "x"}, {"word": "   ", "start_seconds": 1.0}]

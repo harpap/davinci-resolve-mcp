@@ -25,7 +25,7 @@ Every non-deprecated method in the bundled legacy README is represented. This
 does not claim complete coverage of the newer Resolve 21.1 typed API. The
 default compound server exposes **37 tools** that group related operations by
 action parameter, keeping LLM context windows lean. The full granular server
-provides **389 individual tools** for power users. The legacy coverage spans
+provides **390 individual tools** for power users. The legacy coverage spans
 13 API object classes. MCP-level kernel actions are tracked separately in
 [Kernel Action Coverage](../kernels/README.md).
 

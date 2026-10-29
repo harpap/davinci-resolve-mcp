@@ -14,6 +14,7 @@ import unittest
 
 import src.server as compound
 from src.utils import resolve_ai_ledger as _ledger
+from src.utils import timeline_brain_db
 
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
@@ -175,13 +176,16 @@ class Resolve21FolderActionsTest(unittest.TestCase):
         # Isolate the AI-ops ledger to a temp project root (also avoids the real
         # _destructive_versioning_provider hitting a live Resolve during tests).
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self._orig_root = compound._ai_ledger_root
         compound._ai_ledger_root = lambda: self._tmp.name
 
     def tearDown(self):
         compound._get_mp = self._orig_get_mp
         compound._ai_ledger_root = self._orig_root
-        self._tmp.cleanup()
 
     def test_op_is_recorded_in_ledger(self):
         compound.folder("analyze_for_slate", {"marker_color": "Sky"})
@@ -250,6 +254,10 @@ class Resolve21ClipActionsTest(unittest.TestCase):
         compound._get_mp = lambda: (None, None, self.mp, None)
         compound._find_clip = lambda root, cid: self.clip
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self._orig_root = compound._ai_ledger_root
         compound._ai_ledger_root = lambda: self._tmp.name
 
@@ -257,7 +265,6 @@ class Resolve21ClipActionsTest(unittest.TestCase):
         compound._get_mp = self._orig_get_mp
         compound._find_clip = self._orig_find_clip
         compound._ai_ledger_root = self._orig_root
-        self._tmp.cleanup()
 
     def test_remove_motion_blur_records_clip_id_in_ledger(self):
         pending = compound.media_pool_item("remove_motion_blur", {"clip_id": "c1"})
@@ -326,13 +333,16 @@ class Resolve21GenerateSpeechTest(unittest.TestCase):
         self._orig_check = compound._check
         compound._check = lambda: (None, self.proj, None)
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self._orig_root = compound._ai_ledger_root
         compound._ai_ledger_root = lambda: self._tmp.name
 
     def tearDown(self):
         compound._check = self._orig_check
         compound._ai_ledger_root = self._orig_root
-        self._tmp.cleanup()
 
     def test_requires_text_input(self):
         out = compound.project_settings("generate_speech", {"speech_generation_settings": {"VoiceModel": "Female 1"}})
@@ -404,6 +414,10 @@ class MissingExtrasStringReturnTest(unittest.TestCase):
         compound._get_mp = lambda: (None, None, self.mp, None)
         compound._find_clip = lambda root, cid: self.clip
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self._orig_root = compound._ai_ledger_root
         compound._ai_ledger_root = lambda: self._tmp.name
 
@@ -411,7 +425,6 @@ class MissingExtrasStringReturnTest(unittest.TestCase):
         compound._get_mp = self._orig_get_mp
         compound._find_clip = self._orig_find_clip
         compound._ai_ledger_root = self._orig_root
-        self._tmp.cleanup()
 
     def test_ai_result_treats_string_as_failure(self):
         self.assertEqual(compound._ai_result(self.INTELLISEARCH_MSG),
@@ -470,6 +483,10 @@ class RemoveMotionBlurStringReturnTest(unittest.TestCase):
         compound._get_mp = lambda: (None, None, self.mp, None)
         compound._find_clip = lambda root, cid: self.clip
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Registered after the removal so it runs first (LIFO): Windows cannot
+        # delete _soul/timeline_brain.sqlite while the cached handle is open.
+        self.addCleanup(timeline_brain_db.close_all)
         self._orig_root = compound._ai_ledger_root
         compound._ai_ledger_root = lambda: self._tmp.name
         compound._CONFIRM_TOKENS.clear()
@@ -479,7 +496,6 @@ class RemoveMotionBlurStringReturnTest(unittest.TestCase):
         compound._find_clip = self._orig_find_clip
         compound._ai_ledger_root = self._orig_root
         compound._CONFIRM_TOKENS.clear()
-        self._tmp.cleanup()
 
     def _confirmed(self, tool, action, params):
         pending = tool(action, params)

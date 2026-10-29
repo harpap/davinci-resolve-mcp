@@ -47,6 +47,10 @@ const renameSchema = z.object({
   find: z.string(),
   replace: z.string().optional(),
   allowCameraOriginals: z.boolean().optional(),
+  caseSensitive: z
+    .boolean()
+    .optional()
+    .describe('Default false: names differing only in case/Unicode form collide, as on macOS and Windows volumes. Pass true only for a case-sensitive volume.'),
 });
 
 const reelSchema = z.object({ reels: z.array(z.string()), pad: z.number().optional() });
@@ -83,7 +87,7 @@ export const mediaTool = {
     }
     if (action === 'rename_plan') {
       const p = renameSchema.parse(args);
-      return renamePlan(p.names, { find: p.find, replace: p.replace, allowCameraOriginals: p.allowCameraOriginals });
+      return renamePlan(p.names, { find: p.find, replace: p.replace, allowCameraOriginals: p.allowCameraOriginals, caseSensitive: p.caseSensitive });
     }
     if (action === 'reel_normalize') {
       const p = reelSchema.parse(args);

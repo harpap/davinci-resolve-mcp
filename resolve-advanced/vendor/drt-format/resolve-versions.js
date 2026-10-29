@@ -54,19 +54,31 @@ function readVersionStamp(seqXml) {
 
 const SEQ_RE = /(^|\/)SeqContainer(\d*\.xml|\/[^/]+\.xml)$/;
 
+// The import GATE: project.xml's <ProjectVersion> element. Resolve refuses a file whose
+// value is above its own ("A newer version of DaVinci Resolve is needed to import") and
+// never reads the comment stamp for that decision — verified live 2026-10-13 (a 21.0.3
+// DRT with the element at 14 imported into 19.1.3; the same file with only the comment
+// re-stamped did not). DRX and SeqContainer/MpFolder XML carry no such element.
+const PROJECT_VERSION_RE = /<ProjectVersion>\d+<\/ProjectVersion>/g;
+
 // Value-based version re-stamp (not length-dependent → safe even if stamp widths differ).
 // Shared by every format (DRT, DRP, DRX) — the DbAppVer/DbPrjVer header is universal.
+// Also moves the <ProjectVersion> gate (whatever its current value) to the target schema,
+// so a project.xml — a DRP's own or the bundled shell — is importable by the target, not
+// just labelled for it.
 function restampVersions(xmlStr, src, target) {
   return xmlStr
     .split(`DbAppVer="${src.dbAppVer}"`).join(`DbAppVer="${target.dbAppVer}"`)
-    .split(`DbPrjVer="${src.dbPrjVer}"`).join(`DbPrjVer="${target.dbPrjVer}"`);
+    .split(`DbPrjVer="${src.dbPrjVer}"`).join(`DbPrjVer="${target.dbPrjVer}"`)
+    .replace(PROJECT_VERSION_RE, `<ProjectVersion>${target.dbPrjVer}</ProjectVersion>`);
 }
 
 /**
  * Re-stamp a zip-based Resolve file (DRT or DRP) to a target version. Value-based,
  * so it's safe even if stamp widths differ. Re-stamps every XML entry in place
- * (keeping a DRP's full project.xml); adds a stamped generic shell only if the source
- * has no project.xml (a tool-built DRT).
+ * (keeping a DRP's full project.xml, with its <ProjectVersion> gate moved to the
+ * target schema); adds a stamped generic shell only if the source has no project.xml
+ * (a tool-built DRT).
  *
  * @param {Buffer} drtBuffer  a real-schema .drt/.drp (SeqContainer/<uuid>.xml + MpFolder)
  * @param {number|string} targetKey  e.g. 19, 20, 21

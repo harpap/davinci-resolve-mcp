@@ -54,26 +54,36 @@ export function readProjectXml(drpPath) {
   return xml;
 }
 
+// project.xml stores a name as xml text (`Night &amp; Day`); callers name a group as
+// plain text. Read and compare the decoded form so both spellings agree.
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const unescapeXml = (s) =>
+  s.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));/g, (m, dec, hex, name) =>
+    dec ? String.fromCodePoint(+dec) : hex ? String.fromCodePoint(parseInt(hex, 16)) : ENTITIES[name]);
+const xmlEscape = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/** Each <Sm2Group> element with its (decoded) name. */
+function* groups(xml) {
+  for (const m of xml.matchAll(/<Sm2Group\b[\s\S]*?<\/Sm2Group>/g)) {
+    const n = m[0].match(/<Name>([^<]*)<\/Name>/);
+    if (n) yield { name: unescapeXml(n[1]), seg: m[0] };
+  }
+}
+
 /** All color-group names present in the project (from <Sm2Group><Name>…). */
 export function listGroupNames(xml) {
-  const names = [];
-  for (const m of xml.matchAll(/<Sm2Group\b[\s\S]*?<Name>([^<]+)<\/Name>/g)) names.push(m[1]);
-  return [...new Set(names)];
+  return [...new Set([...groups(xml)].map((g) => g.name))];
 }
 
 export function groupSegment(xml, name) {
-  const j = xml.indexOf(`<Name>${name}</Name>`);
-  if (j < 0) return null;
-  const start = xml.lastIndexOf('<Sm2Group', j);
-  const end = xml.indexOf('</Sm2Group>', j);
-  if (start < 0 || end < 0) return null;
-  return xml.slice(start, end + '</Sm2Group>'.length);
+  for (const g of groups(xml)) if (g.name === name) return g.seg;
+  return null;
 }
 
 export const groupBodies = (seg) => [...seg.matchAll(/<Body>([0-9a-fA-F]+)<\/Body>/g)].map((m) => m[1]);
 
 async function decodeBody(bodyHex, label) {
-  const content = `<?xml version="1.0" encoding="UTF-8"?>\n<Resolve_Color_Exchange><Label>${label}</Label><Width>1920</Width><Height>1080</Height><Body>${bodyHex}</Body></Resolve_Color_Exchange>`;
+  const content = `<?xml version="1.0" encoding="UTF-8"?>\n<Resolve_Color_Exchange><Label>${xmlEscape(label)}</Label><Width>1920</Width><Height>1080</Height><Body>${bodyHex}</Body></Resolve_Color_Exchange>`;
   let r;
   try {
     r = await drxTool.handler({ action: 'parse', args: { content } });

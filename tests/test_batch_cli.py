@@ -14,11 +14,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch
 
 from src import batch_cli
-from src.utils import media_analysis_jobs
+from src.utils import media_analysis_jobs, timeline_brain_db
 
 
 class BatchCliParserTests(unittest.TestCase):
@@ -157,7 +157,9 @@ class BatchCliRunIntegrationTests(unittest.TestCase):
     def test_run_drives_synthetic_job_to_completion(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg/ffprobe not installed")
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
+            # Cached SQLite handles must close before Windows removes the directory.
+            cleanup.callback(timeline_brain_db.close_all)
             source_dir = os.path.join(tmp, "source")
             analysis_dir = os.path.join(tmp, "analysis")
             os.makedirs(source_dir)

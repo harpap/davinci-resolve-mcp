@@ -1,5 +1,12 @@
 # Audio / Fairlight Kernel
 
+For animated subtitle effects use live `timeline_ai.set_subtitle_preset` with
+Resolve open. It applies/adjusts Word Highlight through native DRT interchange
+and selects a recoverable revision. For caption text/word timing use the live
+UI, or explicit offline advanced `project_db` maintenance after fully quitting.
+See [subtitle-track editing](../guides/subtitle-track-editing.md). The basic
+`set_subtitle_style` action does not edit animated Fusion presets.
+
 The Audio / Fairlight kernel expands `timeline` into a safer audio-state,
 mapping, voice isolation, auto-sync, transcription, subtitle, and Fairlight
 boundary layer.

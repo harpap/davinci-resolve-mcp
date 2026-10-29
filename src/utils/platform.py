@@ -61,6 +61,14 @@ def get_resolve_paths():
     if env_api and os.path.isdir(env_api):
         api_path = env_api
         modules_path = os.path.join(api_path, "Modules")
+    elif platform_name == "darwin" and not os.path.isdir(api_path):
+        # The Mac App Store builds keep Developer/Scripting inside the bundle
+        # and never create the /Library path above.
+        for candidate in _macos_api_candidates():
+            if os.path.isdir(candidate):
+                api_path = candidate
+                modules_path = os.path.join(api_path, "Modules")
+                break
     env_lib = os.environ.get("RESOLVE_SCRIPT_LIB")
     if env_lib and os.path.isfile(env_lib):
         lib_path = env_lib
@@ -110,20 +118,35 @@ def _windows_lib_candidates():
     return candidates
 
 
+def _macos_bundles():
+    """Installer, App Store Studio, then the free App Store app.
+
+    Imported lazily: this module is loaded while Resolve support is still
+    being located, and `resolve_runtime` is the list launch already uses.
+    """
+    from .resolve_runtime import MACOS_RESOLVE_APPS
+    return MACOS_RESOLVE_APPS
+
+
 def _macos_lib_candidates():
-    """The App Store bundle as well as the installer one.
+    """Every macOS bundle's fusionscript, in launch order.
 
     The default above names `/Applications/DaVinci Resolve/DaVinci Resolve.app`.
-    The App Store build installs to `/Applications/DaVinci Resolve.app` instead —
-    the same class of miss as a Windows install on another drive, and
-    `resolve_runtime.MACOS_RESOLVE_APPS` already records both.
+    The free App Store build installs to `/Applications/DaVinci Resolve.app`,
+    and App Store Studio to `/Applications/DaVinci Resolve Studio.app`.
     """
     inside_bundle = os.path.join("Contents", "Libraries", "Fusion", "fusionscript.so")
-    bundles = (
-        "/Applications/DaVinci Resolve/DaVinci Resolve.app",
-        "/Applications/DaVinci Resolve.app",
-    )
-    return [os.path.join(bundle, inside_bundle) for bundle in bundles]
+    return [os.path.join(bundle, inside_bundle) for bundle in _macos_bundles()]
+
+
+def _macos_api_candidates():
+    """In-bundle scripting dirs, for builds that never write /Library.
+
+    Checked only when the system scripting directory is absent. The installer
+    build's /Library path stays the default when it exists.
+    """
+    inside_bundle = os.path.join("Contents", "Resources", "Developer", "Scripting")
+    return [os.path.join(bundle, inside_bundle) for bundle in _macos_bundles()]
 
 
 def _linux_lib_candidates():

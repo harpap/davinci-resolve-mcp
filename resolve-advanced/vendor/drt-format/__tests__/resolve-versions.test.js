@@ -118,3 +118,45 @@ test('index re-exports retargetDRT + capabilities surface', () => {
   assert.equal(typeof drt.resolveVersions.resolveVersion, 'function');
   assert.equal(typeof drt.capabilities.collectCapabilities, 'function');
 });
+
+// ---- the import gate: <ProjectVersion> in project.xml ----
+// Resolve decides "a newer version is needed" on this element, not on the comment
+// stamp. Verified live 2026-10-13: a 21.0.3 DRT imported into 19.1.3 only once the
+// element read 14. Before this fix retargetDRT moved the comment and left the gate.
+
+const { restampVersions } = require('../resolve-versions');
+
+test('restampVersions moves the <ProjectVersion> gate to the target schema, whatever it was', () => {
+  const src = { dbAppVer: '21.0.3.0007', dbPrjVer: '17' };
+  const tgt = VERSIONS[19];
+  const proj = `<!--DbAppVer="21.0.3.0007" DbPrjVer="17"-->\n<SM_Project><ProjectVersion>17</ProjectVersion><Name>T</Name></SM_Project>`;
+  const out = restampVersions(proj, src, tgt);
+  assert.ok(out.includes('<ProjectVersion>14</ProjectVersion>'), 'gate moved to 14');
+  assert.ok(!out.includes('17'), 'no residual 17 in stamp or gate');
+  // a gate that disagrees with the comment stamp (the bundled shell: comment 15, element 15,
+  // but a hand-edited file could differ) still lands on the target
+  const skew = `<!--DbAppVer="21.0.3.0007" DbPrjVer="17"-->\n<SM_Project><ProjectVersion>15</ProjectVersion></SM_Project>`;
+  assert.ok(restampVersions(skew, src, tgt).includes('<ProjectVersion>14</ProjectVersion>'));
+});
+
+test('restampVersions: null control — XML without the element gains none, other numbers untouched', () => {
+  const seq = `<!--DbAppVer="21.0.3.0007" DbPrjVer="17"-->\n<Sm2SequenceContainer><Version>17</Version><Start>17</Start></Sm2SequenceContainer>`;
+  const out = restampVersions(seq, { dbAppVer: '21.0.3.0007', dbPrjVer: '17' }, VERSIONS[19]);
+  assert.ok(!out.includes('<ProjectVersion>'), 'no element invented');
+  assert.ok(out.includes('<Version>17</Version><Start>17</Start>'), 'unrelated 17s kept');
+  assert.deepEqual(readVersionStamp(out), { dbAppVer: '19.1.3.0007', dbPrjVer: '14' });
+});
+
+test('retargetDRT: the added shell carries the TARGET gate, not the template\'s own', async () => {
+  // The bundled shell is a 20.3.2 export (<ProjectVersion>15</ProjectVersion>); a DRT
+  // retargeted to 19 must not ship a shell Resolve 19 refuses.
+  const src = await makeDrt({ dbAppVer: '21.0.0.0048', dbPrjVer: '17', body: MEDIA_CLIP });
+  for (const tgt of [19, 20, 21]) {
+    const z = await JSZip.loadAsync(await retargetDRT(src, tgt));
+    const proj = await z.file('project.xml').async('string');
+    const gates = proj.match(/<ProjectVersion>(\d+)<\/ProjectVersion>/g) || [];
+    assert.equal(gates.length, 1, `shell has exactly one gate (target ${tgt})`);
+    assert.equal(gates[0], `<ProjectVersion>${VERSIONS[tgt].dbPrjVer}</ProjectVersion>`);
+    assert.deepEqual(readVersionStamp(proj), { dbAppVer: VERSIONS[tgt].dbAppVer, dbPrjVer: VERSIONS[tgt].dbPrjVer });
+  }
+});

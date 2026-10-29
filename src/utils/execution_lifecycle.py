@@ -168,6 +168,10 @@ class RiskClassificationHook(LifecycleHook):
         # rewire what the timeline points at.
         ("timeline", "move_clips"),
         ("timeline", "ripple_insert"),
+        # A slip deletes the original item and re-appends it with a new source
+        # range; grade and sizing are carried, retime and Inspector keyframes
+        # are not. Same rebuild shape as move_clips.
+        ("timeline", "replace_source_range"),
         ("timeline", "create_compound_clip"),
         ("timeline", "create_fusion_clip"),
         # ImportIntoTimeline lays an external edit over the timeline;
@@ -236,11 +240,16 @@ class RiskClassificationHook(LifecycleHook):
         ("media_pool", "create_timeline"),
         ("media_pool", "create_timeline_from_clips"),
         ("media_pool", "create_stereo_clip"),
+        # Adds one bounded item; the source and existing pool contents remain intact.
+        ("media_pool", "import_bounded_media"),
         # Per-item display properties: set them back and the item is as it was.
         ("timeline_item", "set_clip_enabled"),
         ("timeline_item", "set_name"),
         ("timeline_item", "set_crop"),
         ("timeline_item", "set_transform"),
+        # Nudges one property for a frame comparison and sets it back in a
+        # finally; the result says whether the restore read back.
+        ("timeline_item", "probe_keyframe_override"),
         ("timeline_item", "set_composite"),
         ("timeline_item", "set_audio"),
         # Cache toggles and node *labels* — not grades.
@@ -280,6 +289,12 @@ class RiskClassificationHook(LifecycleHook):
         # wrappers refuse those unless acknowledge_trap. See archive_guard.py.
         ("project_manager", "archive"),
         ("project_manager", "safe_project_archive"),
+        # Script execution priority. App-wide, no getter on any build, and
+        # before 21.1 it cannot be lowered again within the session; on 21.1
+        # SetHighPriority(False) restores normal (reported, issue #207).
+        # MEDIUM: a real write to state nothing can read back, but no content
+        # is touched, so safe mode should not block it.
+        ("resolve_control", "set_high_priority"),
         # 21.0 AI deblur renders NEW media and never touches the source (it is
         # confirm-token gated for that reason). The `remove_` prefix rule rated
         # it HIGH on its name alone, which would make safe mode block a create.
@@ -331,6 +346,7 @@ class RiskClassificationHook(LifecycleHook):
         ("media_pool", "setup_multicam_timeline"),
         # Analysis passes that write their results back onto the timeline.
         ("timeline_ai", "create_subtitles"),
+        ("timeline_ai", "set_subtitle_preset"),
         ("timeline_ai", "analyze_dolby_vision"),
         # Grade state that is replaced rather than removed. AddVersion also
         # switches the active version, so a later graph write lands on the new

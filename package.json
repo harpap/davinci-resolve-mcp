@@ -1,6 +1,6 @@
 {
   "name": "davinci-resolve-mcp",
-  "version": "4.8.26",
+  "version": "4.16.0",
   "description": "NPM bootstrapper for the DaVinci Resolve MCP Server.",
   "license": "MIT",
   "author": "Samuel Gursky <samgursky@gmail.com>",
@@ -20,16 +20,16 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "adm-zip": "^0.6.0",
-    "fast-xml-parser": "^5.11.1",
+    "fast-xml-parser": "^5.11.2",
     "fzstd": "^0.1.1",
-    "jszip": "^3.10.1",
-    "zod": "^4.5.4",
+    "jszip": "^3.10.2",
+    "zod": "^4.6.7",
     "zstd-codec": "^0.1.5"
   },
   "optionalDependencies": {
     "better-sqlite3": "^11.10.0",
     "js-yaml": "^4.3.2",
-    "pg": "^8.23.0",
+    "pg": "^8.23.1",
     "sharp": "^0.35.4"
   },
   "files": [
@@ -38,12 +38,15 @@
     "resolve-advanced/server/**/*.mjs",
     "resolve-advanced/server/**/*.py",
     "resolve-advanced/vendor/**",
+    "resolve-advanced/assets/**",
+    "!resolve-advanced/vendor/conform-qc/__fixtures__/**",
     "resolve-advanced/package.json",
     "resolve-advanced/README.md",
     "docs/**/*.md",
     "docs/reference/resolve_scripting_api.txt",
     "examples/**/*.md",
     "scripts/**/*.py",
+    "scripts/edit_subtitle_timeline.mjs",
     "install.py",
     "README.md",
     "CHANGELOG.md",

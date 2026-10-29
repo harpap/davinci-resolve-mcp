@@ -9,8 +9,24 @@ import json
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 
+from src.utils import timeline_brain_db
 from src.utils.media_analysis import summarize_reports
+
+
+@contextmanager
+def _project_root():
+    """A temp analysis root whose cached SQLite handle closes before removal.
+
+    summarize_reports opens `_soul/timeline_brain.sqlite` through the cached
+    connection; Windows cannot delete the directory while that handle is open.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        try:
+            yield root
+        finally:
+            timeline_brain_db.close(root)
 
 
 def _write_report(clip_dir: str, *, signature: str = None, clip_id: str = "c-1",
@@ -34,7 +50,7 @@ def _write_report(clip_dir: str, *, signature: str = None, clip_id: str = "c-1",
 
 class ProvenanceCitationMapTest(unittest.TestCase):
     def test_summarize_emits_provenance_block(self):
-        with tempfile.TemporaryDirectory() as project_root:
+        with _project_root() as project_root:
             clips_root = os.path.join(project_root, "clips")
             _write_report(os.path.join(clips_root, "clip-a"),
                           signature="sig-aaa", clip_id="c-a", clip_name="A.mp4")
@@ -48,7 +64,7 @@ class ProvenanceCitationMapTest(unittest.TestCase):
         self.assertEqual(len(prov["source_reports"]), 2)
 
     def test_source_reports_carry_signature_and_path(self):
-        with tempfile.TemporaryDirectory() as project_root:
+        with _project_root() as project_root:
             clips_root = os.path.join(project_root, "clips")
             _write_report(os.path.join(clips_root, "clip-a"),
                           signature="sig-aaa", clip_id="c-a", clip_name="A.mp4")
@@ -61,7 +77,7 @@ class ProvenanceCitationMapTest(unittest.TestCase):
         self.assertEqual(entry["analyzed_at"], "2026-05-27T22:00:00Z")
 
     def test_unsigned_report_shows_up_in_missing_reports(self):
-        with tempfile.TemporaryDirectory() as project_root:
+        with _project_root() as project_root:
             clips_root = os.path.join(project_root, "clips")
             _write_report(os.path.join(clips_root, "clip-a"),
                           signature=None, clip_id="c-a")  # unsigned
@@ -76,7 +92,7 @@ class ProvenanceCitationMapTest(unittest.TestCase):
         self.assertEqual(missing[0]["reason"], "unsigned_report")
 
     def test_empty_project_returns_empty_provenance(self):
-        with tempfile.TemporaryDirectory() as project_root:
+        with _project_root() as project_root:
             out = summarize_reports(project_root)
         self.assertEqual(out["provenance"]["source_reports"], [])
         self.assertEqual(out["provenance"]["missing_reports"], [])

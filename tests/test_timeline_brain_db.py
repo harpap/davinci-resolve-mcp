@@ -244,7 +244,13 @@ class ConnectionCacheKeying(unittest.TestCase):
         self.real = os.path.join(os.path.realpath(self.tmp), "project")
         os.makedirs(self.real, exist_ok=True)
         link = os.path.join(self.tmp, "via-symlink")
-        os.symlink(self.real, link)
+        try:
+            os.symlink(self.real, link)
+        except OSError as exc:
+            # Windows grants symlink creation only with Developer Mode or the
+            # SeCreateSymbolicLinkPrivilege (WinError 1314); the aliasing
+            # under test cannot be set up without one.
+            self.skipTest(f"symlink creation is unavailable: {exc}")
         self.aliased = link
 
     def test_one_root_two_spellings_is_one_connection(self):

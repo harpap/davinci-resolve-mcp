@@ -3,6 +3,8 @@
 - export_frame_as_still: reject empty path / nonexistent target directory.
 - set_mark_in_out (clip + timeline): reject mark_in > mark_out.
 """
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -57,9 +59,12 @@ class ExportStillGuardTest(unittest.TestCase):
         self.assertIsNone(proj.exported)
 
     def test_valid_path_exports(self):
-        out, proj = self._call({"path": "/tmp/frame.png"})
+        # The system temp dir, not a literal /tmp: on Windows "/tmp" names
+        # the drive-root tmp folder, which normally does not exist.
+        path = os.path.join(tempfile.gettempdir(), "frame.png")
+        out, proj = self._call({"path": path})
         self.assertTrue(out.get("success"))
-        self.assertEqual(proj.exported, "/tmp/frame.png")
+        self.assertEqual(proj.exported, path)
 
 
 class ClipMarkGuardTest(unittest.TestCase):

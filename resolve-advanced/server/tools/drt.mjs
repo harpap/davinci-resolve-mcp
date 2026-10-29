@@ -128,12 +128,80 @@ function resolveTargetProjectVersion({ targetProjectVersion, targetAppVersion })
   throw new Error('provide targetProjectVersion (int) or targetAppVersion (e.g. "19.1.3")');
 }
 
+/**
+ * The verified registry row (vendor/drt-format/resolve-versions.js) for a targetAppVersion, keyed
+ * by MAJOR version like the registry's own resolveVersion. null when the major has no row — the
+ * caller must then say it fell back, never borrow another version's stamp.
+ */
+function registryRowFor(targetAppVersion) {
+  if (targetAppVersion === undefined || targetAppVersion === null || targetAppVersion === '') return null;
+  const { VERSIONS } = drt().resolveVersions;
+  const row = VERSIONS[String(targetAppVersion).split('.')[0]];
+  return row || null;
+}
+
+/**
+ * The gate value and comment stamp a downgrade writes, and where each came from. Precedence:
+ * - <ProjectVersion>/DbPrjVer: explicit targetProjectVersion, else the registry row's dbPrjVer,
+ *   else PROJECT_VERSION_BY_APP (confirmed gate points with no full stamp, e.g. 18 → 11).
+ * - DbAppVer: explicit appVersionString, else the registry row's dbAppVer — only when the row's
+ *   dbPrjVer is the gate being written (a 19 build stamp beside DbPrjVer 11 would be a lie) —
+ *   else a PADDED fallback ("18.0" → "18.0.0.0") that names no real build and is labelled so.
+ */
+function resolveDowngradeStamp(p) {
+  const row = registryRowFor(p.targetAppVersion);
+  let targetPV;
+  let projectVersionSource;
+  if (Number.isInteger(p.targetProjectVersion)) {
+    targetPV = p.targetProjectVersion;
+    projectVersionSource = 'targetProjectVersion';
+  } else if (row) {
+    targetPV = Number(row.dbPrjVer);
+    projectVersionSource = 'registry';
+  } else {
+    targetPV = resolveTargetProjectVersion(p);
+    projectVersionSource = 'version-map';
+  }
+
+  const warnings = [];
+  let appVer;
+  let appVersionSource;
+  if (p.appVersionString) {
+    appVer = p.appVersionString;
+    appVersionSource = 'appVersionString';
+  } else if (row && Number(row.dbPrjVer) === targetPV) {
+    appVer = row.dbAppVer;
+    appVersionSource = 'registry';
+  } else if (p.targetAppVersion) {
+    const parts = String(p.targetAppVersion).split('.');
+    appVer = `${p.targetAppVersion}${'.0'.repeat(Math.max(0, 4 - parts.length))}`;
+    appVersionSource = 'padded-fallback';
+    warnings.push(
+      row
+        ? `DbAppVer "${appVer}" is padded, not a verified build: the registry row for Resolve ${row.marketing} is schema ${row.dbPrjVer}, not the ${targetPV} being written. Pass appVersionString to stamp a real build.`
+        : `DbAppVer "${appVer}" is padded, not a verified build: the registry has no row for Resolve ${parts[0]} (known: ${Object.values(drt().resolveVersions.VERSIONS).map((v) => v.marketing).join(', ')}). The gate (<ProjectVersion> ${targetPV}) is unaffected; pass appVersionString to stamp a real build.`,
+    );
+  } else {
+    appVer = `${targetPV}.0.0.0000`;
+    appVersionSource = 'placeholder';
+    warnings.push(`DbAppVer "${appVer}" is a placeholder (only targetProjectVersion was given). Pass targetAppVersion or appVersionString to stamp a real build.`);
+  }
+  return {
+    targetPV,
+    appVer,
+    projectVersionSource,
+    appVersionSource,
+    registryRow: row ? { marketing: row.marketing, dbAppVer: row.dbAppVer, dbPrjVer: row.dbPrjVer } : null,
+    warnings,
+  };
+}
+
 const downgradeSchema = z.object({
   drtPath: z.string().describe('Source .drt/.drp (e.g. exported from a newer Resolve)'),
   outputPath: z.string().describe('Where to write the downgraded file'),
   targetProjectVersion: z.number().int().optional().describe('On-disk <ProjectVersion> to stamp (overrides targetAppVersion)'),
-  targetAppVersion: z.string().optional().describe('Target Resolve app version, e.g. "19.1.3" — mapped to ProjectVersion'),
-  appVersionString: z.string().optional().describe('DbAppVer comment to stamp (default derived from targetAppVersion, else "<v>.0.0.0000")'),
+  targetAppVersion: z.string().optional().describe('Target Resolve app version, e.g. "19.1.3" — a major with a verified registry row (19, 20, 21) takes its DbAppVer/DbPrjVer from it; other majors use the ProjectVersion map'),
+  appVersionString: z.string().optional().describe('DbAppVer comment to stamp (overrides the registry; default = the verified registry build for targetAppVersion, else a padded fallback, labelled in appVersionSource)'),
 });
 
 /**
@@ -316,7 +384,7 @@ export const drtTool = {
         if (!f || /[\/\\]/.test(f)) throw new Error(`assemble_project: folder must be a plain bin name (no path separators): ${JSON.stringify(t.folder)}`);
         return f;
       });
-      const { assembleTimeline } = drp();
+      const { assembleTimeline, escapeXml } = drp();
       const buffers = [];
       for (const [i, spec] of p.timelines.entries()) {
         const s = { ...spec, timelineName: names[i] };
@@ -459,7 +527,10 @@ export const drtTool = {
             bins.set(folder, bin);
           }
           const bin = bins.get(folder);
-          const tlRe = new RegExp(`<Element>\\s*<Sm2MpTimelineClip DbId="[^"]+">(?:(?!<\\/Element>\\s*<Element>)[\\s\\S])*?<Name>${names[i].replace(/[.*+?^$()|[\]{}]/g, '\\$&')}<\\/Name>[\\s\\S]*?<\\/Sm2MpTimelineClip>\\s*<\\/Element>`);
+          // The name reached the pool clip through escapeXml: `Reel 1 & 2` is stored
+          // `Reel 1 &amp; 2`, and the raw name matched nothing.
+          const nameXml = escapeXml(names[i]).replace(/[.*+?^$()|[\]{}]/g, '\\$&');
+          const tlRe = new RegExp(`<Element>\\s*<Sm2MpTimelineClip DbId="[^"]+">(?:(?!<\\/Element>\\s*<Element>)[\\s\\S])*?<Name>${nameXml}<\\/Name>[\\s\\S]*?<\\/Sm2MpTimelineClip>\\s*<\\/Element>`);
           const hit = mpXml.match(tlRe);
           if (!hit) throw new Error(`assemble_project: could not locate pool clip for timeline ${names[i]} to move into folder ${folder}`);
           mpXml = mpXml.replace(hit[0], '');
@@ -472,11 +543,17 @@ export const drtTool = {
         // scan, subfolders are not). Inner format byte-verified against the
         // template harvest: protobuf{field2: keyedDict{"0": binId, ...},
         // field4: time-varint} in the [u32 2][u32 len][0x81][zstd] wrapper.
-        const { zstdRawFrame } = requireCjs('../../vendor/drp-format/timeline-markers-blob.js');
+        const { zstdRawFrame, lenDelim } = requireCjs('../../vendor/drp-format/timeline-markers-blob.js');
         const binIds = [...bins.values()].map((b) => b.id);
         const childDict = encodeKeyedDict({ hdr: 1, entries: binIds.map((id, i) => ({ key: String(i), type: 0x0a, subType: 0, value: id })) });
+        // field 2's length is a protobuf VARINT, not one raw byte: one bin's
+        // dict is 95 bytes and fits, two bins' is 182 and does not, so
+        // `[0x12, 182]` emitted a 0xb6 continuation byte that swallowed the
+        // dict's first byte and read as length 54 — the registry parsed back
+        // empty with neither bin in it. lenDelim() writes the same single byte
+        // for the one-bin case, so that blob is unchanged.
         const inner = Buffer.concat([
-          Buffer.from([0x12, childDict.length]), childDict,
+          lenDelim(2, childDict),
           Buffer.from([0x20]), Buffer.from('b6cba6a90d', 'hex'),
         ]);
         const frame = zstdRawFrame(inner);
@@ -489,7 +566,7 @@ export const drtTool = {
         for (const [folder, bin] of bins) {
           base.file(bin.entry,
             `<?xml version="1.0" encoding="UTF-8"?>\n` +
-            `<Sm2MpFolder DbId="${bin.id}">\n <FieldsBlob/>\n <Name>${folder}</Name>\n` +
+            `<Sm2MpFolder DbId="${bin.id}">\n <FieldsBlob/>\n <Name>${escapeXml(folder)}</Name>\n` +
             ` <MpFolder>${masterFolderId}</MpFolder>\n <UniqueMediaPoolItemId>${randomUUID()}</UniqueMediaPoolItemId>\n` +
             ` <MediaVec>\n${bin.clips.join('\n')}\n </MediaVec>\n` +
             ` <MediaPool>${poolId}</MediaPool>\n <Folded>false</Folded>\n <ColorTag>FOLDER_COLOR_NONE</ColorTag>\n` +
@@ -709,10 +786,8 @@ export const drtTool = {
     }
     if (action === 'downgrade') {
       const p = downgradeSchema.parse(args);
-      const targetPV = resolveTargetProjectVersion(p);
-      const appVer =
-        p.appVersionString ||
-        (p.targetAppVersion ? `${p.targetAppVersion}${'.0'.repeat(Math.max(0, 4 - String(p.targetAppVersion).split('.').length))}` : `${targetPV}.0.0.0000`);
+      const stamp = resolveDowngradeStamp(p);
+      const { targetPV, appVer } = stamp;
       const zip = await JSZip.loadAsync(await fs.readFile(p.drtPath));
       const out = new JSZip();
       let elementPatches = 0;
@@ -749,6 +824,10 @@ export const drtTool = {
         bytes: buf.length,
         targetProjectVersion: targetPV,
         appVersion: appVer,
+        projectVersionSource: stamp.projectVersionSource,
+        appVersionSource: stamp.appVersionSource,
+        registryRow: stamp.registryRow,
+        ...(stamp.warnings.length ? { warnings: stamp.warnings } : {}),
         projectVersionElementsPatched: elementPatches,
         commentStampsPatched: stampPatches,
         note: 'Stamp downgrade clears the import GATE only; verify content imports cleanly (fine clip corrections can drop across a multi-version gap).',

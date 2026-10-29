@@ -20,7 +20,7 @@
  */
 
 import fs from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 import { z } from 'zod';
 import { createRequire } from 'node:module';
 import { hasSharp } from '../capabilities.mjs';
@@ -87,10 +87,48 @@ const deriveSchema = z.object({
 const manifestSchema = z.object({ conformed: z.array(z.object({}).passthrough()), opts: z.object({}).passthrough().optional() });
 const reportSchema = z.object({ meta: z.object({}).passthrough().optional(), cuts: z.array(z.object({}).passthrough()).optional() });
 
+async function indexFootageRoots(roots, excludeMarkers) {
+  // Treat every root as a filesystem path, never as an external command argument.
+  // Validate the complete list before traversal so malformed roots fail closed.
+  const directories = [];
+  for (const root of roots) {
+    if (typeof root !== 'string' || !root.length || root.startsWith('-')) {
+      throw new Error(`conform.relink_scalefix: invalid footage root: ${root}`);
+    }
+    const directory = path.resolve(root);
+    const stat = await fs.stat(directory).catch(() => null);
+    if (!stat?.isDirectory()) throw new Error(`conform.relink_scalefix: invalid footage root (expected directory): ${root}`);
+    directories.push(directory);
+  }
+  const media = [];
+  const seen = new Set();
+  const pending = [...directories].reverse();
+  while (pending.length) {
+    const directory = pending.pop();
+    if (seen.has(directory)) continue;
+    seen.add(directory);
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      const filePath = path.join(directory, entry.name);
+      if (filePath.includes(`${path.sep}._`) || excludeMarkers.some((marker) => filePath.includes(marker))) continue;
+      // Do not follow nested directory symlinks (including cycles).
+      if (entry.isDirectory()) pending.push(filePath);
+      else if (
+        /\.(mov|mp4)$/i.test(entry.name) &&
+        !seen.has(filePath) &&
+        (entry.isFile() || (entry.isSymbolicLink() && (await fs.stat(filePath).catch(() => null))?.isFile()))
+      ) {
+        seen.add(filePath);
+        media.push({ path: filePath, basename: entry.name });
+      }
+    }
+  }
+  return media;
+}
+
 export const conformTool = {
   name: 'conform',
   description:
-    'Conform/relink QC engine (offline core). Actions: parse_geometry, oracle_derive, list_targets, repair_ladder, build_manifest, analyze_media (ffprobe target media → res/aspect/codec/bitdepth/fps + quality rank), relink_scalefix (surgical: repoint proxy→highres pathurls + fix the scale double-count per clip, preserving retimes/tracks/audio byte-for-byte; index MULTIPLE footage roots via footageDirs, PROXY excluded; returns warnings.leftOnProxyOrTest + unresolvedSources so a source stuck on its proxy cannot slip through), report; verify (gated on optional sharp); fix_reverse_clip (LIVE DB patch — restore a reversed clip dropped on import: copy a generic reverse MediaTimemapBA blob + set the mirrored "In"; SQLite or PostgreSQL; project must be CLOSED; locate→probe→calibrate K→apply); snapshot (sequence LINEAGE store — ingest_xml/ingest_live an editorial-or-conform XML or a live timeline into one content-hashed schema, then list/diff/show/rollback_plan; the diff is the incremental frame-QC worklist; ingest_xml reads Resolve\'s OWN FCP7 export: `-1` clip edges resolve to the adjacent transition\'s junction in record order, each cut records the transition windows its edges sit in, and a missing pproTicksIn (Resolve writes none — measured) falls back to `<in>` for the oracle frame instead of losing it, reported as resolvedEdges/unresolvedEdges/ticksAbsent); qc (comprehensive per-cut frame diff vs the reference render → MATCH/OFFSET/WRONG/REF_OFFLINE/UNREADABLE cached per snapshot; each cut is compared at the first frame CLEAR of its transition windows — inside a window the reference is a blend, or black for a fade — with the source frame advanced at the cut\'s speed, and the result says where it sampled (sample_note); a flat/untextured frame is UNREADABLE (review), never a fake MATCH; a cut that is a FLATTENED COMPOUND (Resolve\'s XML writer leaves a media-less clipitem named after the compound — ingest tags is_compound) is never sampled: review with a note pointing at the OTIO export, never a false WRONG; conform frame is sampled at the oracle source frame AND scale-corrected to the edit framing before diffing, so reversed/scaled clips compare apples-to-apples; REF_OFFLINE = the reference is black/flat at that record position because the shot was offline upstream in editorial — inconclusive, NOT a conform error; op run [ffmpeg+sharp] / markers [red conform / yellow turnover / blue ref-offline / cyan review marker plan] / propagate [carry unchanged verdicts to a new snapshot]). Frame-math is the truth, not filename matches.',
+    "Conform/relink QC engine (offline core). Actions: parse_geometry, oracle_derive, list_targets, repair_ladder, build_manifest, analyze_media (ffprobe target media → res/aspect/codec/bitdepth/fps + quality rank), relink_scalefix (surgical: repoint proxy→highres pathurls + fix the scale double-count per clip, preserving retimes/tracks/audio byte-for-byte; index MULTIPLE footage roots via footageDirs, PROXY excluded; returns warnings.leftOnProxyOrTest + unresolvedSources so a source stuck on its proxy cannot slip through), report; verify (gated on optional sharp); fix_reverse_clip (LIVE DB patch — restore a reversed clip dropped on import: copy a generic reverse MediaTimemapBA blob + set the mirrored \"In\"; SQLite or PostgreSQL; project must be CLOSED; locate→probe→calibrate K→apply); snapshot (sequence LINEAGE store — ingest_xml/ingest_live an editorial-or-conform XML or a live timeline into one content-hashed schema, then list/diff/show/rollback_plan; the diff is the incremental frame-QC worklist; ingest_xml reads Resolve's OWN FCP7 export: `-1` clip edges resolve to the adjacent transition's junction in record order, each cut records the transition windows its edges sit in, and a missing pproTicksIn (Resolve writes none — measured) falls back to `<in>` for the oracle frame instead of losing it, reported as resolvedEdges/unresolvedEdges/ticksAbsent); qc (comprehensive per-cut frame diff vs the reference render → MATCH/OFFSET/WRONG/REF_OFFLINE/UNREADABLE cached per snapshot; each cut is compared at the first frame CLEAR of its transition windows — inside a window the reference is a blend, or black for a fade — with the source frame advanced at the cut's speed, and the result says where it sampled (sample_note); a flat/untextured frame is UNREADABLE (review), never a fake MATCH; a cut that is a FLATTENED COMPOUND (Resolve's XML writer leaves a media-less clipitem named after the compound — ingest tags is_compound) is never sampled: review with a note pointing at the OTIO export, never a false WRONG; conform frame is sampled at the oracle source frame AND scale-corrected to the edit framing before diffing, so reversed/scaled clips compare apples-to-apples; REF_OFFLINE = the reference is black/flat at that record position because the shot was offline upstream in editorial — inconclusive, NOT a conform error; op run [ffmpeg+sharp] / markers [red conform / yellow turnover / blue ref-offline / cyan review marker plan] / propagate [carry unchanged verdicts to a new snapshot]). Frame-math is the truth, not filename matches.",
   async handler({ action, args }) {
     if (action === 'parse_geometry') {
       const p = parseSchema.parse(args);
@@ -152,7 +190,7 @@ export const conformTool = {
             .optional()
             .describe('Case-insensitive path fragments that mark a proxy/test path (default ["PROXY","TEST"]) — flagged as left-on-proxy after relink'),
         })
-        .refine((a) => a.footageDir || a.footageDirs || a.media, { message: 'provide footageDir, footageDirs, or media' })
+        .refine((a) => a.footageDir || a.footageDirs?.length || a.media, { message: 'provide footageDir, footageDirs, or media' })
         .parse(args);
       const xml = await fs.readFile(p.filePath, 'utf8');
       const excludeMarkers = p.indexExcludeMarkers || ['/PROXY/'];
@@ -160,14 +198,7 @@ export const conformTool = {
       let media = p.media;
       if (!media) {
         const roots = p.footageDirs && p.footageDirs.length ? p.footageDirs : [p.footageDir];
-        const r = spawnSync('find', [...roots, '-iname', '*.mov', '-o', '-iname', '*.mp4'], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-        if (r.status !== 0) throw new Error(`conform.relink_scalefix: find failed in [${roots.join(', ')}]: ${(r.stderr || '').slice(-200)}`);
-        const seen = new Set();
-        media = r.stdout
-          .split('\n')
-          .filter((l) => l && !l.includes('/._') && !excludeMarkers.some((m) => l.includes(m)))
-          .filter((path) => (seen.has(path) ? false : (seen.add(path), true)))
-          .map((path) => ({ path, basename: path.split('/').pop() }));
+        media = await indexFootageRoots(roots, excludeMarkers);
       } else {
         media = media.map((m) => ({ ...m, basename: m.basename || m.path.split('/').pop() }));
       }

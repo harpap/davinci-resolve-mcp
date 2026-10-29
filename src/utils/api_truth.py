@@ -1666,18 +1666,30 @@ API_TRUTH: List[Dict[str, Any]] = [
     {
         "symbol": "Per-subtitle text content and timing editing",
         "object": "TimelineItem (subtitle track)",
-        "reality": "TimelineItem on a subtitle track exposes only 21 standard "
-                   "transform/composite properties (Pan, Tilt, ZoomX, Opacity, "
-                   "Crop, etc.). There are no methods to get or set subtitle "
-                   "text (GetText/SetText), start time, end time, or duration "
-                   "for individual subtitle items. Subtitles created via "
-                   "CreateSubtitlesFromAudio or imported via the Resolve UI "
-                   "cannot have their content or timing read or modified "
-                   "programmatically. Verified via dir() and GetProperty() on "
-                   "Resolve 21.0.0.48.",
-        "recommended": "No workaround exists — subtitle text and timing are "
-                       "completely inaccessible from the scripting API. Must "
-                       "be edited in the Resolve UI.",
+        "reality": "GetName, GetStart and GetEnd read caption names and bounds, "
+                   "and Timeline.DeleteClips can delete captions. There are no "
+                   "public methods to set caption text or per-word timings. "
+                   "Read-only live probe on Studio 21.1.0.17 (Windows, 2026-10-02): "
+                   "GetType=generator, GetProperty returned an empty dict, "
+                   "GetFusionCompCount=0, and dir() exposed no caption/text "
+                   "methods; the supplied reproduction also reports false "
+                   "GetProperty/SetProperty results. A subtitle SetProperty "
+                   "request must be refused before timeline auto-archiving. "
+                   "In the supplied 21.1 reproduction, UI text edits leave Name "
+                   "stale and move original AI words/times to protobuf f18/19/20; "
+                   "current f14/15/16 may contain invalid intervals. Whether "
+                   "a later save re-times them is not established here.",
+        "recommended": "Use advanced project_db list_captions / write_captions / "
+                       "check_captions on a local SQLite project with Resolve "
+                       "fully quit. Current text comes from f14, not stale Name. "
+                       "f15/16 and f19/20 use 60 ticks/sec; f21 is the original "
+                       "caption frame anchor. The tool returns timeline-frame "
+                       "times rebased to the item's current Start. Writes need "
+                       "explicit word times, preserve unknown fields, reject "
+                       "gaps/zero durations and re-index Items atomically, with "
+                       "backup and readback. This is an unsupported DB workaround; "
+                       "render/reopen validation of the implementation remains "
+                       "required before release.",
         "tags": ["missing-method", "subtitle", "text", "timing"],
         "submit": "missing",
     },
@@ -1687,8 +1699,8 @@ API_TRUTH: List[Dict[str, Any]] = [
         "reality": "There is no API method to set or query subtitle font "
                    "family, font size, text color, background color, outline, "
                    "shadow, position, alignment, or to apply/query subtitle "
-                   "style presets. TimelineItem.GetProperty() on subtitle "
-                   "items returns only transform/composite keys. "
+                   "style presets. Older probes returned only transform/composite "
+                   "keys; a read-only Studio 21.1.0.17 probe returned an empty dict. "
                    "Timeline.GetSetting() and Project.GetSetting() return "
                    "None for all probed subtitle-style keys (e.g. "
                    "'subtitleFontName', 'subtitleFontSize', "
@@ -1713,7 +1725,26 @@ API_TRUTH: List[Dict[str, Any]] = [
                        "blob (a freshly added subtitle track has none until it "
                        "is styled once in the UI). Burn-in overlays via Fusion "
                        "titles remain a visual alternative but do not produce "
-                       "subtitle tracks.",
+                       "subtitle tracks. Animated Word Highlight is DIFFERENT: "
+                       "list_subtitle_styles may report styled:false while an "
+                       "animation is present. Sm2TiItem_Sm2TiTrack links a "
+                       "Sm2TiVideoClip holder via FusionCompHolderItems to a "
+                       "Sm2TiCompositionTable. The supplied Studio 21.1.0.17 "
+                       "reproduction verified cloning these three rows; local "
+                       "read-only inspection corroborated the format. Use "
+                       "list_subtitle_presets / copy_subtitle_preset, or "
+                       "set_subtitle_preset for named Word Highlight inputs "
+                       "inside the nested zlib tool section. These new actions "
+                       "check that Resolve is fully quit BEFORE database writing. "
+                       "For live Word Highlight effects instead use timeline_ai "
+                       "set_subtitle_preset: native DRT export, patch the exported "
+                       "holder, and native import as a recoverable timeline revision. "
+                       "On Studio 21.1.0.17/Windows (2026-10-08), colour, size and "
+                       "position changed visibly without quitting Resolve; clip/caption "
+                       "bounds and media IDs matched the original. This does not add a "
+                       "native subtitle setter or establish other effects/builds. "
+                       "Holder Duration is preserved; its rendering semantics "
+                       "and per-caption preset layouts remain unverified.",
         "tags": ["missing-method", "subtitle", "style", "preset"],
         "submit": "missing",
     },
@@ -1726,12 +1757,16 @@ API_TRUTH: List[Dict[str, Any]] = [
                    "provider (e.g. whisper-cli, Google Speech, AWS Transcribe). "
                    "The language selection via resolve.AUTO_CAPTION_LANGUAGE_* "
                    "is the only customization; the engine itself cannot be "
-                   "changed. Furthermore, there is no API method to import an "
-                   "SRT file into a subtitle track programmatically — "
-                   "File -> Import -> Subtitle is UI-only.",
-        "recommended": "No workaround exists for provider selection or SRT "
-                       "import. External transcripts must be converted to SRT "
-                       "and imported through the Resolve UI.",
+                   "changed. There is no dedicated subtitle import method. "
+                   "However, MediaPool.ImportMedia(srt) + AppendToTimeline was "
+                   "reported working on Studio 21.0.4.5 (issue #169). Whether "
+                   "that route carries word timing for animated presets on "
+                   "21.1 has not been verified; SRT contains only cue timing.",
+        "recommended": "Use Resolve's engine for CreateSubtitlesFromAudio. "
+                       "For external SRT, test ImportMedia + AppendToTimeline "
+                       "on the exact installed build or import through the UI. "
+                       "Use project_db write_captions for explicit word timings "
+                       "with Resolve fully quit; do not assume SRT supplies them.",
         "tags": ["missing-method", "subtitle", "transcription",
                  "speech-recognition", "asr"],
         "submit": "missing",
@@ -1980,6 +2015,62 @@ API_TRUTH: List[Dict[str, Any]] = [
                        "timeline_item_color.apply_trace_plan does this itself and "
                        "reports {page: {before, switched, restored}}.",
         "tags": ["silent-failure", "color", "grade", "page", "drx", "version"],
+    },
+    {
+        "symbol": "Graph.ApplyGradeFromDRX (timeline graph, empty pTrackVer)",
+        "object": "Graph",
+        "signature": "Timeline.GetNodeGraph().ApplyGradeFromDRX(path, gradeMode) -> bool",
+        "reality": "A .drx holds the clip grade in <pClipFullVer> (VerType 0) and the "
+                   "timeline grade in <pTrackVer> (VerType 1); a timeline-graph apply "
+                   "loads <pTrackVer>. When that block has HasCorrection false, which is "
+                   "what drx generate (direct) writes and what a clip still carries, "
+                   "the apply returns True, adds no grade and replaces the existing "
+                   "timeline graph with an empty one, deleting any node on it. Copying "
+                   "the clip <Body> into <pTrackVer> with HasCorrection true applied as "
+                   "expected (0 -> 1 node, no other graph changed).",
+        "recommended": "Check the file's <pTrackVer> before a timeline apply. "
+                       "graph.apply_grade_from_drx and timeline_item_color.safe_apply_drx "
+                       "with source='timeline' refuse a .drx whose <pTrackVer> is absent or "
+                       "has HasCorrection false (DRX_NO_TIMELINE_GRADE). Clear the "
+                       "timeline graph on purpose with reset_all_grades.",
+        "tags": ["silent-failure", "color", "grade", "drx", "node-graph", "timeline"],
+        "issue": 318,
+        "mitigation": ["_refuse_empty_track_grade"],
+        "verified_on": "DaVinci Resolve Studio 21.1.1.10 (issue #318; not re-measured here)",
+        "measured": "2026-10-27 on Studio 19.1.3.7 (tests/live_drx_apply_readback_validation.py): "
+                    "every Timeline.GetNodeGraph().ApplyGradeFromDRX returned False and left the "
+                    "timeline graph at 0 nodes, with the timeline grade present or empty, so "
+                    "the empty-graph replacement does not reproduce on that build. drx "
+                    "generate's single-node path writes no <pTrackVer> at all; the multi-node "
+                    "path writes one with HasCorrection false.",
+    },
+    {
+        "symbol": "Graph.ApplyGradeFromDRX (grade lands in another graph)",
+        "object": "Graph",
+        "signature": "TimelineItem.GetNodeGraph().ApplyGradeFromDRX(path, gradeMode) -> bool",
+        "reality": "The True return does not say which graph took the grade. On a clip "
+                   "in a color group, applying to the clip's graph replaced node 1 of "
+                   "the group's pre-clip graph instead (removing the LUT the group "
+                   "shared) and left the clip graph at one empty node. The manual says "
+                   "the Node Editor's graph dropdown (Clip / Group Pre-Clip / Group "
+                   "Post-Clip / Timeline) decides where a still's grade lands; whether "
+                   "the API follows the same rule has not been confirmed.",
+        "recommended": "Read every graph the grade could land in before and after the "
+                       "apply. graph.apply_grade_from_drx and "
+                       "timeline_item_color.safe_apply_drx compare node count, labels and "
+                       "LUTs of the clip, group pre/post and timeline graphs, return "
+                       "changed_graphs, and fail with DRX_APPLIED_TO_OTHER_GRAPH when only "
+                       "an untargeted graph changed. No change at all is reported, not "
+                       "failed: a same-structure grade changes only parameters, which no "
+                       "readback reaches, so confirm with a rendered frame.",
+        "tags": ["silent-failure", "color", "grade", "drx", "node-graph", "readback"],
+        "issue": 319,
+        "mitigation": ["_apply_drx_with_readback"],
+        "verified_on": "DaVinci Resolve Studio 21.1.1.10 (issue #319; not re-measured here)",
+        "measured": "2026-10-27 on Studio 19.1.3.7 (tests/live_drx_apply_readback_validation.py): "
+                    "a clip assigned to a color group took the grade in its own graph; the "
+                    "group pre/post graphs did not change. The readback detected the clip "
+                    "change through the node label.",
     },
     {
         "symbol": "MediaPool.AppendToTimeline clipInfo endFrame (exclusive bound)",
@@ -2920,17 +3011,40 @@ API_TRUTH: List[Dict[str, Any]] = [
         "submit": "missing",
     },
     {
-        "symbol": "Resolve.SetHighPriority (write-only, irreversible per session)",
+        "symbol": "Resolve.SetHighPriority (write-only; irreversible before 21.1)",
         "object": "Resolve",
-        "signature": "() -> Bool",
-        "reality": "Raises the Resolve process priority; there is no getter "
-                   "and no way to lower it again through the API (confirmed "
-                   "absent from dir() on Studio 19.1.3.7).",
-        "recommended": "Call it only when the user asked for a long render on "
-                       "a dedicated machine; state cannot be read back or "
-                       "undone without restarting Resolve.",
-        "tags": ["app-control", "missing-method", "readback"],
+        "signature": "() -> Bool  (19.x); (highPriority: bool) -> bool  (21.1 typed stub)",
+        "reality": "VERSION-SCOPED. On Studio 19.1.3.7 (measured here) the "
+                   "method takes no argument and raises priority; there is no "
+                   "getter and no way to lower it again through the API "
+                   "(no getter in dir()), so it is irreversible for the session. "
+                   "Resolve 21.1 retyped it SetHighPriority(highPriority: bool) "
+                   "-> bool, documented as 'script execution priority to high or "
+                   "normal'. Reported by @legionsound (issue #207) from Studio "
+                   "21.1.0.14 on macOS, 2026-09-09; NOT reproduced here (no 21.1 "
+                   "install). One live session, in order: (False) -> True, "
+                   "(True) -> True, () -> False, (1) -> False, ('high') -> False, "
+                   "(False) -> True. So on 21.1 the no-argument call is a NO-OP "
+                   "that reports its own failure, only a real bool is accepted "
+                   "(1 and 'high' are rejected like the missing argument), and "
+                   "the setting is REVERSIBLE: SetHighPriority(False) restores "
+                   "normal. There is still no getter on any build — dir() on the "
+                   "live 21.1 Resolve object shows SetHighPriority as the only "
+                   "priority-related name — so the current state cannot be read "
+                   "back on either generation.",
+        "recommended": "On 21.1+ pass a real bool; never forward 1 or a string "
+                       "(coerce first — resolve_control set_high_priority and "
+                       "granular set_high_priority do, and refuse values that "
+                       "name no boolean). On older builds call it only when the "
+                       "user asked for a long scripted job on a dedicated "
+                       "machine: it cannot be lowered without restarting "
+                       "Resolve, which is why both tools refuse high=false "
+                       "there. No build offers readback, so report the native "
+                       "return, never a confirmed state.",
+        "tags": ["app-control", "missing-method", "readback", "version-gated", "reported"],
         "submit": "missing",
+        "issue": 207,
+        "mitigation": ["resolve_control.set_high_priority", "set_high_priority"],
     },
     {
         "symbol": "Project.IsRenderingInProgress (stuck True after deleting the rendering project)",
@@ -3436,6 +3550,86 @@ API_TRUTH: List[Dict[str, Any]] = [
         "tags": ["dctl", "validation", "unreliable-return", "version-gated", "reported"],
         "submit": "bug",
     },
+    {
+        "symbol": "Project.StartRendering",
+        "object": "Project",
+        "signature": "(jobIds: list[str], isInteractiveMode=False) -> bool  (21.1 typed stub)",
+        "reality": "STATE-DEPENDENT RETURN. Reported by @legionsound (issue #207) "
+                   "from Studio 21.1.0.14 on macOS, 2026-09-09; NOT reproduced "
+                   "here (no 21.1 install). In one session, some freshly "
+                   "configured render jobs made StartRendering return False and "
+                   "remain Ready, while an identical job configured later in the "
+                   "same session started and completed. Official direct calls "
+                   "reproduced BOTH outcomes, so a False from one interface and a "
+                   "True from another in that sequence is not an interface "
+                   "difference. The trigger was not isolated; no root cause is "
+                   "established. The same session confirmed the two 21.1 "
+                   "RenderSettings keys the compound whitelist used to drop: "
+                   "UseUniqueFilenames=True gave queued filenames Resolve's "
+                   "'_V1-0001' suffix, and AudioFormat='wav' with LPCM produced "
+                   "complete 14-second stereo 48 kHz 24-bit WAVs whose decoded PCM "
+                   "matched byte for byte across both community interfaces.",
+        "recommended": "Treat the boolean as a hint in both directions. After "
+                       "start, read render(action='get_job_status') and "
+                       "render(action='verify_output') for the actual output file "
+                       "before reporting a render as running or done; a False "
+                       "with the job still Ready means nothing rendered. Do not "
+                       "auto-retry in a wrapper: the measured later success was a "
+                       "NEW identical job, not a retry of the same one, so a loop "
+                       "would hide the state it depends on. Surface the False and "
+                       "let the caller decide whether to re-queue.",
+        "tags": ["render", "unreliable-return", "state-dependent", "version-gated", "reported"],
+        "submit": "bug",
+        "issue": 207,
+        "verified_on": "DaVinci Resolve Studio 21.1.0.14",
+    },
+    {
+        "symbol": "Project settings presets mutated before the project's first SaveProject",
+        "object": "Project",
+        "signature": "SaveCurrentProjectSettingsAsNewPreset / UpdateProjectSettingsPreset / "
+                     "SetProjectSettingsPreset / DeleteProjectSettingsPreset (presetName) "
+                     "-> bool  (21.1+)",
+        "reality": "DESTROYS THE PROJECT ITSELF, NOT A GRADE, AND REPORTS SUCCESS "
+                   "THROUGHOUT. Reported by @legionsound (issue #207) from Studio "
+                   "21.1.0.14 on macOS, 2026-09-09; NOT reproduced here (no 21.1 "
+                   "install). On a NEW project that had never been saved: save a "
+                   "project-settings preset (SaveCurrentProjectSettingsAsNewPreset), "
+                   "change the timeline resolution, then update "
+                   "(UpdateProjectSettingsPreset), apply (SetProjectSettingsPreset) "
+                   "and delete (DeleteProjectSettingsPreset) the preset, then "
+                   "SaveProject and close. Every native call returned True. "
+                   "SQLite PRAGMA integrity_check on the project database still "
+                   "reported ok, but its Sm2MultiSysData table had ZERO rows, and "
+                   "LoadProject then failed with 'DaVinci Resolve failed to open "
+                   "project.' Reproduced twice, through community wrappers and "
+                   "through direct native calls. The control — the same sequence "
+                   "with one explicit SaveProject BEFORE any preset mutation — kept "
+                   "its Sm2MultiSysData row and reopened. Which single call in the "
+                   "sequence is responsible was not isolated, and preset "
+                   "Export/Import were not part of it, so do not assume any preset "
+                   "write is safe on an unsaved project. "
+                   "ProjectManager.GetProjectLastModifiedTime cannot serve as a "
+                   "'has this project been saved' guard: it returned None even for "
+                   "saved projects on the same build.",
+        "recommended": "Before ANY project-settings-preset write on 21.1, call "
+                       "ProjectManager.SaveProject() on the current project and "
+                       "require it to return True; never mutate presets on a "
+                       "project created in this session that has not been saved. "
+                       "Do not read the True returns, a clean integrity_check, or "
+                       "the absence of an error as evidence the project survived "
+                       "— the only proof is closing it and reloading it. A "
+                       "wrapper must not save silently on the caller's behalf "
+                       "(the first save is the caller's decision), so it should "
+                       "require an explicit assertion that the project has been "
+                       "saved, and refuse without one. If the project already "
+                       "holds work, back it up (export a .drp) before the first "
+                       "preset write.",
+        "tags": ["destructive", "unrecoverable", "project", "order-dependent",
+                 "silent-failure", "unreliable-return", "version-gated", "reported"],
+        "submit": "bug",
+        "issue": 207,
+        "verified_on": "DaVinci Resolve Studio 21.1.0.14",
+    },
     # ── Measured on Studio 21.1.0.14, 2026-09-09 (trap-aware execution work) ──
     {
         "symbol": "TimelineItem.CopyGrades",
@@ -3616,6 +3810,225 @@ API_TRUTH: List[Dict[str, Any]] = [
                     "INPB_Passive true, INPI_LabelControl_NumInputs 6 / 5 / 2.",
         "mitigation": ["fusion_comp.add_keyframe", "fusion_comp.add_modifier"],
     },
+    {
+        "symbol": "Project.ExportCurrentFrameAsStill (frame-accurate capture)",
+        "object": "Project",
+        "signature": "(filePath) -> Bool",
+        "reality": "After Timeline.SetCurrentTimecode and a timecode read-back, it "
+                   "writes the viewer's processed frame (grade, Fusion, titles) at "
+                   "full timeline resolution: 3840x2160 in about 0.2 s, on every "
+                   "call, on a real project where the one-frame render route "
+                   "failed on every call with AddRenderJob returning nothing. It "
+                   "needs no page switch, no Gallery panel and no render settings, "
+                   "so there is no project state to put back. The image format "
+                   "follows the file extension. Not measured: whether a subtitle "
+                   "track is burned in. The Media and Fusion pages report no "
+                   "timeline playhead, so a named frame cannot be sought there.",
+        "recommended": "Use it for frame evidence: timeline_frame capture "
+                       "(quality='frame', the default) seeks, reads the playhead "
+                       "back BY FRAME before exporting (a True from "
+                       "SetCurrentTimecode that did not move has been measured), "
+                       "reads it again after (a moving playhead means the still "
+                       "is some other frame), and restores it. Keep the "
+                       "single-frame render (quality='render') for when it is "
+                       "asked for.",
+        "tags": ["frame-capture", "timeline", "readback"],
+        "verified_on": "DaVinci Resolve Studio 19.1.3.7",
+        "measured": "2026-10-20/21, a 16-clip conform session on a real project; "
+                    "the render route failed every time, this call worked every time.",
+        "mitigation": ["_playhead_frame_export", "_seek_and_confirm"],
+    },
+    {
+        "symbol": "TimelineItem.SetProperty (Inspector-keyframed property)",
+        "object": "TimelineItem",
+        "signature": "(propertyKey, propertyValue) -> Bool",
+        "reality": "On a clip that carries Edit-page (Inspector) keyframes for a "
+                   "transform property, as clips from an AAF import can, "
+                   "SetProperty('ZoomX', v) returns True and GetProperty reads v "
+                   "back, but the rendered frame never changes: the keyframes "
+                   "win at render time. Nothing in the return or the readback "
+                   "says so. On 19.x it cannot be detected or fixed from the API "
+                   "either: dir() of a live TimelineItem lists no keyframe "
+                   "methods (GetKeyframeCount, AddKeyframe and the rest are "
+                   "absent, and not in the scripting README), so the attribute "
+                   "is None and a call dies as \"'NoneType' object is not "
+                   "callable\".",
+        "recommended": "Prove a transform with frames, never with the return or "
+                       "the readback. timeline_item probe_keyframe_override "
+                       "exports the frame twice (null control), nudges the "
+                       "property, exports again and restores it; verdict "
+                       "'override' means keyframes are winning. Then remove them "
+                       "in the Inspector, or rebuild the item from the Media Pool "
+                       "(timeline replace_source_range re-appends it; a fresh "
+                       "append should carry no Inspector keyframes, which is not "
+                       "yet verified by render). The timeline_item keyframe "
+                       "actions return KEYFRAME_API_UNAVAILABLE on builds without "
+                       "the methods.",
+        "tags": ["silent-failure", "unreliable-return", "keyframes", "transform",
+                 "timeline", "missing-method"],
+        "submit": "bug",
+        "verified_on": "DaVinci Resolve Studio 19.1.3.7",
+        "mitigation": ["_timeline_item_probe_keyframe_override",
+                       "_timeline_item_keyframe_api_missing"],
+    },
+    {
+        "symbol": "Timeline.DeleteClips (locked track)",
+        "object": "Timeline",
+        "signature": "([TimelineItem], ripple) -> bool",
+        "reality": "On a locked track DeleteClips returns a bare False and "
+                   "deletes nothing, with nothing to say the lock is why. The "
+                   "lock does not stop SetProperty: transform and other property "
+                   "writes on items of the same locked track still succeed, so a "
+                   "property edit that worked is no evidence the track is "
+                   "unlocked. Separate from the Edit-page gate in 'Timeline."
+                   "DeleteClips (requires the Edit page; flaky first attempt)'.",
+        "recommended": "Read Timeline.GetIsTrackLocked for every track the "
+                       "targets sit on before deleting. timeline delete_clips "
+                       "refuses with TRACK_LOCKED naming the tracks; "
+                       "replace_source_range unlocks only with unlock_track=true "
+                       "and locks the track again afterwards; media_pool "
+                       "append_to_timeline names locked target tracks in its "
+                       "failure.",
+        "tags": ["silent-failure", "timeline", "edit", "track-lock"],
+        "submit": "bug",
+        "verified_on": "DaVinci Resolve Studio 19.1.3.7",
+        "mitigation": ["_timeline_locked_tracks", "_track_locked_refusal"],
+    },
+    {
+        "symbol": "TimelineItem Pan / Tilt / ZoomX / ZoomY (Edit Inspector transform units)",
+        "object": "TimelineItem",
+        "signature": "GetProperty/SetProperty('Pan'|'Tilt'|'ZoomX'|'ZoomY', value)",
+        "reality": "Zoom is relative to the FITTED image, not the source: with "
+                   "input scaling 'scale entire image to fit' the clip is first "
+                   "fitted inside the timeline frame, and ZoomX 1.0 is that "
+                   "fitted size. Pan and Tilt are not timeline pixels either: "
+                   "Pan moves the image Pan x fittedW / timelineW pixels and "
+                   "Tilt moves it Tilt x fittedH / timelineH pixels, +Tilt up. "
+                   "Measured: a 720x1280 portrait clip in a 4096x1716 timeline "
+                   "fits at 965x1716, and Pan -500 moved it 117 px left (500 x "
+                   "965 / 4096 = 117.8). The 'Pan = timeline pixels' rule of "
+                   "thumb holds only when fittedW = timelineW, i.e. a clip whose "
+                   "aspect is at least as wide as the timeline's. Not measured: "
+                   "whether a Zoom other than 1.0 changes the Pan/Tilt scale, "
+                   "and the fill/stretch/crop scaling modes.",
+        "recommended": "Convert pixel offsets with the fitted size: Pan = px x "
+                       "timelineW / fittedW, Tilt = px_up x timelineH / fittedH. "
+                       "timeline_item set_transform takes pan_px / tilt_px and "
+                       "does this for scale-to-fit (or with fitted_width/"
+                       "fitted_height given), reporting the factors it used.",
+        "tags": ["transform", "units", "timeline", "edit"],
+        "verified_on": "DaVinci Resolve Studio 19.1.3.7",
+        "mitigation": ["_edit_transform_pixel_units"],
+    },
+    {
+        "symbol": "Resolve.OpenPage (during playback)",
+        "object": "Resolve",
+        "signature": "(pageName) -> Bool",
+        "reality": "With playback engaged, a visit to the Color page followed by "
+                   "a page/playhead restore (resolve_control restore_state) "
+                   "timed out, and from then on EVERY scripting call hung, "
+                   "including a brand-new scriptapp() connection: Resolve's main "
+                   "thread was stuck in a viewer render loop until playback was "
+                   "dealt with in the GUI. The 19.x scripting API has no "
+                   "transport control (no Play, Stop or IsPlaying), so a script "
+                   "can neither stop playback first nor ask whether it is "
+                   "running.",
+        "recommended": "Detect playback by reading Timeline.GetCurrentTimecode "
+                       "twice ~0.2 s apart; a playhead that moved means the "
+                       "transport is running. resolve_control open_page / "
+                       "restore_state, gallery_stills grab_and_export and the "
+                       "page-switching timeline_frame routes refuse with "
+                       "PLAYBACK_ACTIVE (allow_during_playback=true overrides). "
+                       "Stop playback in the GUI (Space or K) before retrying.",
+        "tags": ["hang", "page-dependent", "playback", "missing-method"],
+        "submit": "bug",
+        "verified_on": "DaVinci Resolve Studio 19.1.3.7",
+        "mitigation": ["_playback_refusal"],
+    },
+    {
+        "symbol": "Timeline slip / trim of an existing item (no API on 19.x)",
+        "object": "Timeline",
+        "reality": "There is no call to slip an item's source range or trim its "
+                   "edges in place: no SetProperty key moves the source in-point "
+                   "and no Timeline method takes a new range. The only route is "
+                   "to delete the item and append the new range at the same "
+                   "record frame, which loses its grade, transform, crop and "
+                   "composite unless they are carried over by hand. With a "
+                   "source rate different from the timeline's, the appended "
+                   "length can come out a frame off (the AppendToTimeline "
+                   "mixed-fps floor) and needed a corrected endFrame and a "
+                   "second append.",
+        "recommended": "timeline replace_source_range: append the new range on a "
+                       "temporary track at the same record frame, CopyGrades "
+                       "onto it, carry transform/crop/composite/scaling, delete "
+                       "the original, append the final copy on the original "
+                       "track, CopyGrades from the temporary copy, re-apply the "
+                       "properties, delete the temporary copy, restore the track "
+                       "lock. Start, end and duration are verified exactly; an "
+                       "endFrame that lands a frame off is corrected and retried.",
+        "tags": ["missing-method", "timeline", "edit", "mixed-fps"],
+        "submit": "missing",
+        "verified_on": "DaVinci Resolve Studio 19.1.3.7",
+        "mitigation": ["_timeline_replace_source_range_impl"],
+    },
+    {
+        "symbol": "BezierSpline.SetKeyFrames (handle coordinates)",
+        "object": "Fusion BezierSpline",
+        "signature": "(keyframes, replace) -> None",
+        "reality": "A key's LH/RH handles are OFFSETS from that key, {1: dTime, 2: dValue}, "
+                   "not absolute (time, value) points. GetKeyFrames() reads them back the "
+                   "same way: Fusion's own auto-created first key returns RH {1: 2.0, "
+                   "2: -0.333} for a key at frame 0 easing toward the next one. Absolute "
+                   "coordinates are accepted without complaint and read back verbatim, so "
+                   "nothing flags the mistake; the curve is simply wrong. Measured with keys "
+                   "0 -> 1 at frames 10 -> 20: flat handles written relative ({3, 0} / "
+                   "{-3, 0}) sample 0, 0.113, 0.5, 0.887, 1 at frames 10/12/15/18/20, a clean "
+                   "ease-in-out; the same intent written absolute ({13, 0} / {17, 1}) "
+                   "samples 0, 0.015, 0.089, 0.217, 1. A whip authored with absolute handles "
+                   "moved the wrong way (0.5 -> 0.56) before snapping to its end value.",
+        "recommended": "Write handles relative to their key: RH = {segment * k, 0} and "
+                       "LH = {-segment * k, 0} gives a flat-tangent ease, where k is the handle "
+                       "length as a fraction of the segment (0.33 is a standard ease, 0.6 to "
+                       "0.75 an expo-like snap). Prove a curve by sampling "
+                       "tool.GetInput(name, frame) at a few frames, not by reading the keys "
+                       "back.",
+        "tags": ["fusion", "keyframe", "silent-failure", "units"],
+        "verified_on": "DaVinci Resolve Studio 21.0.2.4",
+        "measured": "2026-10-26 on a Fusion composition clip: BezierSpline keyed 10 -> 20 "
+                    "with relative vs absolute flat handles, connected to Blur YBlurSize, "
+                    "sampled with GetInput at frames 10/12/15/18/20; whip Transform Center "
+                    "via XYPath confirmed in rendered frames.",
+    },
+    {
+        "symbol": "BezierSpline attach (stray key at the current time)",
+        "object": "Fusion Tool input / BezierSpline",
+        "signature": "tool.AddModifier(input, 'BezierSpline') | tool[input] = comp.BezierSpline()",
+        "reality": "Connecting an EMPTY spline to an input, by either route, adds a key at "
+                   "the comp's current time holding the input's old value. Keys set "
+                   "afterwards are added next to it, and SetKeyFrames(keys, True) does not "
+                   "remove it despite the replace flag. Measured with CurrentTime 0: "
+                   "AddModifier then input[10] = 5, input[20] = 9 left keys [0, 10, 20] with "
+                   "1.0 (the old value) at frame 0, so the value drifts from 1.0 before the "
+                   "first intended key instead of holding. The stray key can be deleted with "
+                   "spline.DeleteKeyFrames(time) once other keys exist; deleting it while it "
+                   "is the only key does nothing. A spline that already has keys when it is "
+                   "connected gets no extra key.",
+        "recommended": "Build the spline first and connect it last: s = comp.BezierSpline(); "
+                       "s.SetKeyFrames(keys, True); tool[input] = s. When the spline is "
+                       "already attached, delete the stray key (DeleteKeyFrames(time)) after "
+                       "the intended keys are written, then confirm with GetKeyFrames(). "
+                       "fusion_comp add_keyframe does this itself: its first call on an "
+                       "input deletes the stray key, reports it as removed_stray_keys, and "
+                       "returns stray_keys_remaining plus a warning if it survives.",
+        "tags": ["fusion", "keyframe", "silent-failure"],
+        "mitigation": ["fusion_comp.add_keyframe", "_fusion_remove_stray_keys"],
+        "verified_on": "DaVinci Resolve Studio 21.0.2.4",
+        "measured": "2026-10-26 on a Fusion composition clip (CurrentTime 0), on a Blur: "
+                    "AddModifier + two indexed writes -> keys [0, 10, 20]; empty spline "
+                    "connected then SetKeyFrames(replace=True) -> [0, 10, 20]; "
+                    "DeleteKeyFrames(0.0) then -> [10, 20]; spline keyed before connect -> "
+                    "[10, 20].",
+    },
 
 ]
 
@@ -3674,11 +4087,26 @@ ACTION_SYMBOLS: Dict[Tuple[str, str], List[str]] = {
     ("timeline", "apply_look_to_items"): ["TimelineItem.CopyGrades"],
     ("timeline_item_color", "export_lut"): ["TimelineItem.ExportLUT"],
     ("timeline_item_color", "safe_export_lut"): ["TimelineItem.ExportLUT"],
+    ("graph", "apply_grade_from_drx"): [
+        "Graph.ApplyGradeFromDRX (timeline graph, empty pTrackVer)",
+        "Graph.ApplyGradeFromDRX (grade lands in another graph)",
+    ],
+    ("timeline_item_color", "safe_apply_drx"): [
+        "Graph.ApplyGradeFromDRX (timeline graph, empty pTrackVer)",
+        "Graph.ApplyGradeFromDRX (grade lands in another graph)",
+    ],
     ("timeline", "duplicate"): ["Timeline.DuplicateTimeline"],
     ("project_manager", "archive"): ["ProjectManager.ArchiveProject"],
     ("fusion_comp", "add_modifier"): ["Tool.AddModifier", "Tool.AddModifier (NestControl inputs)"],
-    ("fusion_comp", "add_keyframe"): ["Tool.AddModifier (NestControl inputs)"],
+    ("fusion_comp", "add_keyframe"): [
+        "Tool.AddModifier (NestControl inputs)",
+        "BezierSpline attach (stray key at the current time)",
+    ],
     ("project_manager", "safe_project_archive"): ["ProjectManager.ArchiveProject"],
+    ("render", "start"): ["Project.StartRendering"],
+    ("resolve_control", "set_high_priority"): [
+        "Resolve.SetHighPriority (write-only; irreversible before 21.1)",
+    ],
 }
 
 

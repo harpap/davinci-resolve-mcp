@@ -14,8 +14,10 @@ generator-only timeline, then:
   0. Control: calls the raw getter from the Edit page and prints whether this
      build switches page on it. Informational — either answer is a finding.
   A. Captures once while the project has never had a render output folder.
-     There is nothing to read back then (AddRenderJob returns ''), and the
-     capture must still work and say nothing.
+     There is nothing to read back then (AddRenderJob returns ''), the capture
+     must still return the frame, and it must warn that the temporary folder
+     was kept. Deleting it would leave Deliver pointing at a missing path
+     (issue #296).
   B. Gives the project a user's render settings — a .mov format, an output
      folder and a custom file name — and records what a render job queued
      now would inherit.
@@ -31,7 +33,8 @@ generator-only timeline, then:
      and everything in B, must come back.
 
 A pass needs every page read back to be the starting page, every job readback
-to match B, AND no capture to carry a warnings block. The harness also prints
+to match B, and no capture made after a render path exists to carry a warnings
+block. The harness also prints
 how many OpenPage attempts each restore needed on this build.
 
 The project that was open beforehand is saved before the switch and loaded
@@ -204,7 +207,8 @@ def main() -> int:
                 return result[0], result[1].get("warnings")
             return result, None
 
-        # A. Never had an output folder: nothing to read, nothing to say.
+        # A. Never had an output folder. The frame still comes back, and the
+        # temporary folder stays so Deliver is not pointed at a deleted path.
         resolve.OpenPage("edit")
         unset = _inherits()
         first, first_warnings = _image_of(server.timeline_frame(
@@ -215,8 +219,10 @@ def main() -> int:
         )
         if unset is not None:
             failures.append("A: expected a fresh project to refuse a render job (no TargetDir)")
-        if isinstance(first, dict) or first_warnings:
-            failures.append(f"A: capture with no output folder: {first if isinstance(first, dict) else first_warnings}")
+        if isinstance(first, dict):
+            failures.append(f"A: capture with no output folder failed: {first}")
+        elif not first_warnings or not any("Render Path Inaccessible" in w for w in first_warnings):
+            failures.append(f"A: expected the kept-folder warning, got {first_warnings}")
 
         # B. A user's render settings, and what a job inherits from them.
         mov_codecs = proj.GetRenderCodecs("mov") or {}

@@ -1,0 +1,17 @@
+# Agent-rule files written by scripts/agent-rules/generate.mjs. Its --check
+# mode (run by tests/test_agent_rules_drift.py) compares bytes, so a CRLF
+# working tree (core.autocrlf=true, the Windows default) reads every one of
+# them as stale. Pinning LF keeps a Windows checkout byte-identical to what the
+# generator writes; normalising inside --check would instead accept a CRLF file
+# that a later byte-level consumer might not (issue #278). Keep this list in
+# step with the emit()/emitBlock() calls in generate.mjs.
+AGENTS.md                               text eol=lf
+.cursorrules                            text eol=lf
+.windsurfrules                          text eol=lf
+.clinerules                             text eol=lf
+.cursor/rules/*.mdc                     text eol=lf
+.github/copilot-instructions.md         text eol=lf
+.github/instructions/*.instructions.md  text eol=lf
+.windsurf/rules/*.md                    text eol=lf
+.roo/rules/resolve-mcp.md               text eol=lf
+.continue/rules/resolve-mcp.md          text eol=lf

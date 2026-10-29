@@ -37,7 +37,7 @@ from src.utils.update_check import (
 
 # ─── Version ──────────────────────────────────────────────────────────────────
 
-VERSION = "4.8.26"
+VERSION = "4.16.0"
 # Only hard floor: mcp[cli] requires Python 3.10+. There is no upper bound —
 # Resolve's scripting bridge loads into newer interpreters on recent builds
 # (Python 3.14 verified against Resolve Studio 20.3.2). Older Resolve builds
@@ -225,14 +225,25 @@ def require_current_python(label="Python"):
 
 RESOLVE_PATHS = {
     "Darwin": {
+        # The Library scripting dir is what the installer writes. The Mac App
+        # Store builds never create it; their API lives inside the bundle.
+        # Installer first, then App Store Studio, then the free App Store app,
+        # so a machine with more than one keeps the installer.
         "api": [
             "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting",
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Resources/Developer/Scripting",
+            "/Applications/DaVinci Resolve Studio.app/Contents/Resources/Developer/Scripting",
+            "/Applications/DaVinci Resolve.app/Contents/Resources/Developer/Scripting",
         ],
         "lib": [
             "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
+            "/Applications/DaVinci Resolve Studio.app/Contents/Libraries/Fusion/fusionscript.so",
+            "/Applications/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
         ],
         "app": [
             "/Applications/DaVinci Resolve/DaVinci Resolve.app",
+            "/Applications/DaVinci Resolve Studio.app",
+            "/Applications/DaVinci Resolve.app",
         ],
     },
     "Windows": {
@@ -1232,6 +1243,42 @@ def advanced_is_bootable(project_dir):
     return True
 
 
+def provision_advanced_node_deps(project_dir, dry_run=False):
+    """Install resolve-advanced runtime deps when the tree is present and they are not.
+
+    The live subtitle path imports those packages from this checkout. Registering
+    the advanced server as an npx fallback does not install them for that path
+    (issue #297). Returns a short status string and never raises: a missing npm
+    must not abort the Python install.
+    """
+    project_dir = Path(project_dir)
+    advanced = project_dir / "resolve-advanced"
+    if not (advanced / "package.json").is_file():
+        return "advanced server tree is not present"
+    if advanced_is_bootable(project_dir):
+        return "already installed"
+    command = "npm install --omit=dev --omit=optional"
+    if dry_run:
+        return f"would run {command}"
+    npm = "npm.cmd" if platform.system() == "Windows" else "npm"
+    try:
+        result = subprocess.run(
+            [npm, "install", "--omit=dev", "--omit=optional", "--no-audit", "--no-fund"],
+            cwd=str(advanced),
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return f"npm was not found; from {advanced} run: {command}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit {result.returncode}"
+        return f"npm install failed: {tail}. From {advanced} run: {command}"
+    if not advanced_is_bootable(project_dir):
+        return f"npm install finished but Node dependencies are still missing. From {advanced} run: {command}"
+    return "installed"
+
+
 def build_advanced_npx_entry(python_path=None):
     """Fallback advanced entry that runs from the npm package, not this tree.
 
@@ -1543,7 +1590,7 @@ def verify_resolve_connection(python_path, api_path, lib_path):
 
 def print_banner():
     title = f"DaVinci Resolve MCP Server — Installer v{VERSION}"
-    subtitle = "37 compound · 389 full · 3 platforms"
+    subtitle = "37 compound · 390 full · 3 platforms"
     print()
     print(bold("  ╔══════════════════════════════════════════════════════╗"))
     print(bold(f"  ║{title:^54}║"))
@@ -2277,6 +2324,15 @@ def main():
         print(f"  Server:    {green(str(server_path))}")
     else:
         print(f"  Server:    {yellow(str(server_path))} {dim('(file not found — check path)')}")
+
+    # The live subtitle preset path imports jszip from this tree. The advanced
+    # server entry can fall back to npx; that fallback does not install the
+    # packages this checkout's timeline_ai call actually loads (issue #297).
+    node_deps = provision_advanced_node_deps(project_dir, dry_run=args.dry_run)
+    if node_deps in ("installed", "already installed"):
+        print(f"  Node deps: {green(node_deps)}")
+    else:
+        print(f"  Node deps: {yellow(node_deps)}")
 
     # ══════════════════════════════════════════════════════════════════════
     # STEP 4: Configure MCP Clients

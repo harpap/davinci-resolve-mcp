@@ -236,6 +236,30 @@ tool — did it happen, was it verified, what changed:
   not read a missing `changes` as a no-op.
 - **`warnings`** — present only when there are any.
 - **`execution_id`** — correlates one call across logs and transcripts.
+- **`timeline`** — on timeline-scoped tools, `{name, id}` of the timeline the
+  call acted on. A pinned call (below) adds `pinned: true` and
+  `restored_current`, or `restore_failed: true` if the caller's timeline could
+  not be made current again.
+
+A failed call (an `{"error": {...}}` body) also comes back with MCP
+`isError: true`, so hooks and retry policies that follow the spec see the
+failure without parsing the body.
+
+**Unread params are reported.** When an action succeeds without reading some
+key you passed, the result carries `ignored_params: [...]` and the envelope
+lists them under `warnings`. Treat it as "that key did nothing": a misspelled
+key, an option this action does not take, or an alternative another key
+overrode (an `index` passed alongside `id`).
+
+**Pinning a call to a timeline.** `timeline`, `timeline_item*`,
+`timeline_markers`, `timeline_frame`, `timeline_ai`, `graph` and `render`
+act on the current timeline unless you pass `timeline_id` (preferred) or
+`timeline_name`. The server then makes that timeline current for the call
+and restores yours afterwards, so a user clicking another timeline mid-session
+cannot redirect your write. An unknown id, an ambiguous name or an id/name
+pair that disagree is refused before anything runs. Exceptions, where these
+keys keep their own meaning: `timeline.set_current` (selects by
+`timeline_id`) and the imports (`timeline_name` names the new timeline).
 
 The envelope is namespaced under `_operation` rather than merged into the top
 level because `status`, `operation`, `warnings`, `result` and `changes` are all
@@ -374,7 +398,7 @@ to the user as verified.
 | Mode | Entry point | Tool count | Use when |
 |---|---|---|---|
 | Compound (default) | `src/server.py` | 37 tools | Most workflows — keeps context lean |
-| Granular (full) | `src/server.py --full` | 389 tools | Power users needing one tool per API method |
+| Granular (full) | `src/server.py --full` | 390 tools | Power users needing one tool per API method |
 
 Resolve 21.1 adds [twelve read-only discovery controls](reference/resolve211-read-controls.md)
 for edition, presets, audio formats/codecs, normalization modes, speed, fades
@@ -439,6 +463,37 @@ Operating rules an agent must know:
   `iConfirmProjectClosed:true`; every write auto-backs-up and read-back
   verifies. Resolve caches open projects in memory: after patching, fully QUIT
   and relaunch Resolve or the patch will not be visible.
+- **Live subtitle effects**: use `timeline_ai.set_subtitle_preset` with Resolve
+  open. `timeline_ai.list_title_presets` discovers installed title/subtitle names
+  and full IDs. `preset` accepts a bundled or installed subtitle preset; omit it
+  to adjust the existing effect. `inputs` accepts common literal font/style,
+  size/position and text RGBA; highlight, outline, drop-shadow and justification
+  integers are Word Highlight-specific. The centred reference stores alignment
+  `3`. Per-word scale and cue transitions are not literal inputs and are refused.
+  Native DRT export/edit/import creates and selects a recoverable revision,
+  preserving the original. Do not ask the user to quit or relaunch for effects.
+  Render frames to verify appearance; inventory/readback alone is insufficient.
+  Installed presets are captured through the native title API in a temporary
+  timeline, then applied to the subtitle track. Common controls also work for
+  Lollipop. Never guess unmapped effect controls. `preset_reference` accepts a
+  native subtitle DRT; unbundled dry runs require such a reference.
+  Ordinary title presets use `timeline.insert_fusion_title` with the full ID,
+  then scoped `fusion_comp` probes and input writes. See
+  [title library automation](guides/title-library-automation.md) for acceptance.
+- **Offline subtitle DB edits**: `project_db` `list_captions` / `write_captions` /
+  `check_captions` cover text, bounds, explicit per-word timing, add and delete.
+  `list_subtitle_presets` / `copy_subtitle_preset` / `set_subtitle_preset` handle
+  animated Fusion holders separately from basic `list_subtitle_styles`.
+  New subtitle writes enforce full Resolve quit BEFORE patching, snapshot the
+  SQLite DB and verify transactionally. See
+  [subtitle-track editing](guides/subtitle-track-editing.md) for selectors,
+  Word Highlight controls, dry-run examples and live-validation limits.
+- **Offline conform footage indexing**: `conform.relink_scalefix` accepts existing
+  directories in `footageDir` / `footageDirs` (absolute or relative). Empty,
+  missing, non-directory, and `-`-prefixed roots are refused. Indexing uses Node
+  filesystem traversal, preserves MOV/MP4 filtering and proxy exclusions, and
+  does not follow nested directory symlinks. Explicit `media` lists bypass
+  directory indexing.
 - **Guards are load-bearing.** Advanced tools refuse rather than fabricate
   (silent-lie guards): a thrown "refused" error usually means wrong input space,
   log-encoded frames, or missing media — read the message before retrying.
@@ -794,6 +849,12 @@ Key actions:
   is fine. No connection needed, and it never launches Resolve
 - `get_page` / `open_page(page)` — read or switch the active page
 - `get_keyframe_mode` / `set_keyframe_mode(mode)`
+- `set_high_priority(high?)` — script execution priority (granular:
+  `set_high_priority`). `high` defaults to true; on Resolve 21.1+ it calls
+  `SetHighPriority(bool)` and `high=false` restores normal. Older builds take no
+  argument and cannot lower it again this session, so `high=false` is refused
+  there. No build has a getter — report the native return, never a confirmed
+  state. Only call when the user asked for it
 - `get_fairlight_presets` — Resolve 20.2.2+; returns available Fairlight
   preset names
 - `list/save/load/delete/import/export_user_preferences_preset` — Resolve
@@ -1798,7 +1859,11 @@ missing volume roots, sample basenames, and a recommended next step. If a source
 volume such as a camera card is not mounted, `build_relink_plan` skips broad
 search by default and reports `skip_reason="missing_source_volume_not_mounted"`;
 mount the volume or pass `skip_search_when_volume_missing=false` only when a
-bounded scan of approved roots is intentional.
+bounded scan of approved roots is intentional. Paths written on another OS
+(`E:\...` on macOS, `/Volumes/...` on Windows, after a project moves between
+machines) are flagged `foreign_os_path`: their volume can never be mounted
+here, so they report `primary_cause="foreign_os_path"`, do not hold back the
+search, and are matched by their own basename under the approved roots.
 
 Audio / Fairlight kernel actions (v2.14.0+) add live-tested audio state,
 mapping, voice-isolation, sync, transcription, subtitle, and Fairlight boundary
@@ -1808,6 +1873,10 @@ helpers:
 - `probe_audio_track(track_index?)`
 - `probe_audio_item(track_type?, track_index?, item_index?)`
 - `safe_set_audio_properties(properties, restore?, dry_run?, track_type?, track_index?, item_index?)`
+  — Volume / Pan / EQ writes are not honoured by Resolve's API; a request for
+  any of them returns a `known_limitation` block with the workaround (bake gain
+  into a rendered copy, or apply a Fairlight preset). `AudioSyncOffset` writes
+  do work.
 - `audio_mix_capability_report(...)`
 - `voice_isolation_capabilities(track_index?, track_type?, item_index?)`
 - `audio_mapping_report(clip_ids?)`
@@ -1866,9 +1935,16 @@ rendering — grade, Fusion, titles, transitions — rather than inferring it fr
 metadata. (For the raw camera file instead, use
 `media_analysis(action="extract_frames")`.)
 
-- `quality="frame"` (default) renders exactly that frame — the only
-  frame-accurate route. Full resolution, well under a second, works headless.
-  `preview` is the same render bounded to 1280px.
+- `quality="frame"` (default) exports exactly that frame with
+  `Project.ExportCurrentFrameAsStill`: frame-accurate, full resolution, about
+  0.2 s, **no page switch and no render settings**. The seek is read back by
+  frame before the export and the playhead is read again after it; a playhead
+  that moved means playback is running and the capture refuses
+  (`PLAYBACK_ACTIVE`). `preview` is the same export bounded to 1280px.
+- `quality="render"` renders the frame as a one-frame render job. Use it only
+  when you want that route by name: on a real project on Studio 19.1.3.7 it
+  failed every call with "AddRenderJob returned nothing" while the export
+  worked every call.
 - `quality="thumbnail"` is instant and touches nothing, but returns the **clip's**
   thumbnail — identical for every frame of that clip. Use it to see which clip is
   under the playhead, never to judge a specific frame. Needs the Color page *and*
@@ -1879,22 +1955,23 @@ metadata. (For the raw camera file instead, use
   (default), `png`, or `tif`.
 - `timecode` accepts absolute (`01:00:15:12`) or elapsed (`00:00:15:12`) time;
   `frame` is the absolute timeline frame. Omit both to capture the playhead.
+- The page-switching routes (`render`, `thumbnail`, `still`) refuse while
+  playback is running; `allow_during_playback=true` overrides.
 
-The playhead, page, current timeline and Gallery are restored. The render route
+The playhead, page, current timeline and Gallery are restored. The `render` route
 additionally touches project render settings and puts them back: render mode,
 format, codec, mark range and output folder (`TargetDir`, read off a throwaway
 render job because there is no `GetRenderSettings`). The file name
 (`CustomName`) is never written, and the render job is deleted. One gap: a
 project that has never had an output folder has none to put back, and Resolve
 cannot clear one, so it is left on the capture's temporary folder
-(`capabilities` repeats this as `render_settings_caveat`). Reach for
-`quality="thumbnail"` when zero side effects matter more than accuracy.
+(`capabilities` repeats this as `render_settings_caveat`).
 
-The render calls pull Resolve onto the Deliver page. The capture switches back
-and reads the page to confirm it. If a restore does not take (page, playhead,
-timeline, render mode, format, range or output folder), the image is followed by a
-`{"warnings": [...]}` block naming what was left changed and the call that puts
-it back. No warnings block means every restore was confirmed.
+The render calls pull Resolve onto the Deliver page. The `render` route switches
+back and reads the page to confirm it. If a restore does not take (page,
+playhead, timeline, render mode, format, range or output folder), the image is
+followed by a `{"warnings": [...]}` block naming what was left changed and the
+call that puts it back. No warnings block means every restore was confirmed.
 
 ```
 timeline_frame(action="capture", params={"timecode": "01:00:15:12", "max_width": 1280})
@@ -1917,8 +1994,11 @@ Key actions: `create_subtitles(settings?)` (human-readable settings resolved to
 
 Timeline items are identified by `track_type`, `track_index`, and `item_index`
 (all default to `"video"`, `1`, `0` respectively — the first clip on the first
-video track). Always retrieve item IDs via `timeline.get_items` before operating
-on specific items.
+video track), or by `timeline_item_id`, the item's `GetUniqueId()`. Prefer the
+id: on Resolve 21.1 `item_index` also counts transitions, so it shifts whenever
+a transition is added or removed. Read ids with `timeline.get_items` or
+`timeline.probe_timeline_structure`. An unknown id is refused with
+`ITEM_NOT_FOUND`; it never falls back to item 0.
 
 **`timeline_item`** — Properties, transform, speed, audio, keyframes.
 
@@ -1932,7 +2012,9 @@ Key actions:
 - `get_transform` / `set_transform(Pan?, Tilt?, ZoomX?, ZoomY?, RotationAngle?, ...)`
 - `get_crop` / `set_crop(CropLeft?, CropRight?, CropTop?, CropBottom?, ...)`
 - `get_composite` / `set_composite(Opacity?, CompositeMode?)`
-- `get_audio` / `set_audio(Volume?, Pan?, AudioSyncOffset?)`
+- `get_audio` / `set_audio(Volume?, Pan?, AudioSyncOffset?)` — Resolve ignores
+  Volume / Pan / EQ writes on audio (returns a `known_limitation` block); only
+  `AudioSyncOffset` / `AudioSyncOffsetIsManual` take effect
 - `get_voice_isolation_state` / `set_voice_isolation_state(state)` — Resolve
   20.1+; audio timeline items only
 - `get_keyframes(property)`, `add_keyframe(property, frame, value)`,
@@ -2215,6 +2297,19 @@ media_pool(action="safe_import_sequence", params={
   "end_index": 1048,
   "target_folder": "Master/Plates"
 })
+media_pool(action="import_bounded_media", params={
+  "source_path": "/absolute/path/source.mov",
+  "start_frame": 100,
+  "end_frame": 240,
+  "destination_folder": "Master/Selects",
+  "name": "Selected range"
+})
+# start_frame/end_frame are raw Resolve startFrame/endFrame values. The MCP does
+# not add or subtract a frame; inspect bounded_import_properties after creation.
+# Contributor-validated on DaVinci Resolve Studio 21.1.1 Build 10 (#275): this
+# itemInfo form created a native subclip, and endFrame was inclusive (0–300
+# reported 301 frames). Treat that as an observed configuration-specific result,
+# not a guarantee for every Resolve version or media type.
 media_pool(action="media_pool_boundary_report", params={"selected": True, "depth": 2})
 # Positioned append (MediaPool.AppendToTimeline([{clipInfo}, ...])) — e.g. rebuild a subtitle row after delete_clips
 media_pool(action="append_to_timeline", params={"clip_infos": [
@@ -2420,6 +2515,8 @@ reports, deletes the project, and removes generated media. See
 | `"No project open"` | No project is currently loaded | Call `project_manager(action="load", params={"name": "..."})` |
 | `"No current timeline"` | Project has no timeline set as current | Call `timeline(action="set_current", params={"index": 1})` |
 | `"No item at index N"` | `item_index` out of range for the track | Call `timeline(action="get_items", ...)` first to find valid indices |
+| `ITEM_NOT_FOUND` | No item with that `timeline_item_id` on the target timeline | Re-read ids; pass `timeline_id` if the item is on another timeline |
+| `TIMELINE_NOT_FOUND` / `TIMELINE_NAME_AMBIGUOUS` | The pin names no timeline, or several share the name | `timeline(action="list")` and pin by `timeline_id` |
 | `"Clip not found"` | Stale or wrong `clip_id` | Re-fetch IDs via `media_pool(action="get_selected")` or `folder(action="get_clips")` |
 | `"Gallery not available"` | Not on Color page | `resolve_control(action="open_page", params={"page": "color"})` |
 | `"GrabStill failed"` | Not on Color page or no clip under playhead | Switch to Color page, move playhead over a clip |
@@ -2453,6 +2550,42 @@ and compare — rather than assuming a group shares a grade.
 Other recorded traps ride along on results as `known_limitation` without blocking.
 `RESOLVE_MCP_DISABLE_TRAP_GUARD=1` disables both behaviours.
 
+
+**Stop playback before switching pages** — On Studio 19.1.3.7 a Color-page visit
+while playback was running, followed by `restore_state`, timed out, and after
+that every scripting call hung, even a fresh connection: Resolve's main thread
+was stuck in a viewer render loop. 19.x has no transport API, so the server
+cannot stop playback. `resolve_control open_page` / `restore_state`,
+`gallery_stills grab_and_export` and the page-switching `timeline_frame` routes
+refuse with `PLAYBACK_ACTIVE` when the playhead is moving; ask the user to stop
+playback (Space or K). `allow_during_playback=true` overrides.
+
+**A transform write that reads back can still not render** — On a clip with
+Inspector keyframes (an AAF import can bring them), `SetProperty('ZoomX', v)`
+returns True and reads back `v`, and the render does not change. 19.x has no
+TimelineItem keyframe methods at all, so the `timeline_item` keyframe actions
+return `KEYFRAME_API_UNAVAILABLE` there. `timeline_item(action=
+"probe_keyframe_override")` exports the frame twice (null control), nudges the
+property, exports again and restores it; `verdict: "override"` means keyframes
+are winning. Prove sizing with frames, never with the readback.
+
+**Locked tracks fail deletes silently** — `DeleteClips` on a locked track
+returns a bare False, while `SetProperty` on the same items still works.
+`timeline delete_clips` refuses with `TRACK_LOCKED` naming the tracks.
+
+**Edit transform units** — Zoom is relative to the fitted image. Pan moves
+`Pan × fittedW / timelineW` px and Tilt `Tilt × fittedH / timelineH` px (+up),
+so Pan equals timeline pixels only when the fitted width equals the timeline's.
+A 720×1280 clip in a 4096×1716 timeline fits at 965×1716, and Pan −500 moved it
+117 px. `set_transform` takes `pan_px` / `tilt_px` and converts for
+scale-to-fit.
+
+**Slipping a clip** — there is no slip or trim API.
+`timeline(action="replace_source_range", params={"timeline_item_id": ...,
+"source_start": N})` rebuilds the item at the same record frame through a
+temporary track, carrying grade, transform, crop, composite and scaling, and
+verifies start, end and duration exactly. It is confirm-token gated, archives
+the timeline first, and refuses a locked track unless `unlock_track=true`.
 
 **Resolve API object lifetimes** — Objects like timelines, clips, and color groups
 returned by the API are live references that can become stale if the project state
@@ -2533,8 +2666,9 @@ extracted from a delivered render.
 
 **Start here: `timeline_frame(action="capture")`** — Returns the frame at the
 playhead (or at any `timecode`/`frame` you name) as MCP image content, so a
-multimodal assistant can simply look at it. It renders that one frame, which is
-what makes it frame-accurate; `max_width` bounds the context cost.
+multimodal assistant can simply look at it. It exports that one frame from the
+viewer with `ExportCurrentFrameAsStill`, which is frame-accurate and switches no
+page; `max_width` bounds the context cost.
 
 ```
 timeline_frame(action="capture", params={"timecode": "01:00:15:12", "max_width": 1280})

@@ -34,6 +34,8 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
+from src.utils.proc import windows_pid_alive
+
 _SIDECAR = os.path.join(tempfile.gettempdir(), "davinci_resolve_mcp_busy.json")
 # A long op that has run this long is presumed crashed/leaked and ignored.
 MAX_OP_AGE_SECONDS = 2 * 60 * 60
@@ -47,6 +49,10 @@ _local_owner: Optional[int] = None  # thread ident of the in-process registrant
 
 
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        # os.kill(pid, 0) is TerminateProcess on Windows, not a probe: a record
+        # naming this process would kill it.
+        return windows_pid_alive(pid) is True
     try:
         os.kill(pid, 0)
         return True

@@ -32,6 +32,7 @@ def _run_app_command(
     try:
         result = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             check=False,
             capture_output=True,
             text=True,
@@ -235,7 +236,10 @@ def restart_resolve_app(resolve_obj, wait_seconds: int = 5) -> bool:
     try:
         # Get Resolve executable path for restart
         if platform.system().lower() == 'darwin':
-            resolve_path = '/Applications/DaVinci Resolve/DaVinci Resolve.app'
+            from src.utils.resolve_runtime import MACOS_RESOLVE_APPS
+            resolve_path = next((p for p in MACOS_RESOLVE_APPS if os.path.exists(p)), None)
+            if resolve_path is None:
+                return False
         elif platform.system().lower() == 'windows':
             # Default path, may need to be customized
             resolve_path = r'C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe'
@@ -258,11 +262,11 @@ def restart_resolve_app(resolve_obj, wait_seconds: int = 5) -> bool:
         logger.info("Attempting to start Resolve")
         
         if platform.system().lower() == 'darwin':
-            subprocess.Popen(['open', resolve_path])
+            subprocess.Popen(['open', resolve_path], stdin=subprocess.DEVNULL)
         elif platform.system().lower() == 'windows':
-            subprocess.Popen([resolve_path])
+            subprocess.Popen([resolve_path], stdin=subprocess.DEVNULL)
         elif platform.system().lower() == 'linux':
-            subprocess.Popen([resolve_path])
+            subprocess.Popen([resolve_path], stdin=subprocess.DEVNULL)
         
         return True
     except Exception as e:
@@ -334,3 +338,95 @@ def open_project_settings(resolve_obj) -> Dict[str, Any]:
 def open_preferences(resolve_obj) -> Dict[str, Any]:
     """Open the Preferences dialog. See `_open_dialog` for the result shape."""
     return _open_dialog(resolve_obj, "OpenPreferences", "Preferences")
+
+
+# ── Script execution priority ───────────────────────────────────────────────
+#
+# Resolve 21.1 retyped `Resolve.SetHighPriority(highPriority: bool) -> bool`
+# ("Sets the script execution priority to high or normal"). Reported by
+# @legionsound on Studio 21.1.0.14 (issue #207): (False) -> True, (True) ->
+# True, and the no-argument call this server used to make -> False, a no-op;
+# (1) and ("high") also -> False. So on 21.1 the argument must be a real bool
+# and the setting is reversible. On 19.1.3.7 the method takes no argument and
+# there is no way to lower it again within the session. No build has a getter.
+
+#: First build whose stub types the boolean argument.
+HIGH_PRIORITY_TYPED_FLOOR = "21.1"
+
+_NO_READBACK_NOTE = (
+    "Resolve exposes no getter for script execution priority on any build, so "
+    "the state cannot be read back; success reflects the native return only."
+)
+
+
+def set_high_priority(resolve_obj, high: Any = True) -> Dict[str, Any]:
+    """Set script execution priority, choosing the call form by build.
+
+    `high` is coerced with `recognised_bool` (so "false" means False) and a
+    value that names no boolean is refused before any call: Resolve 21.1
+    returns a silent False for 1 or "high", so forwarding a guess would turn
+    the caller's mistake into a no-op. The native call always receives a real
+    bool. Returns a plain dict; a refusal carries `error` and `refused: True`
+    and means nothing was called.
+    """
+    from src.utils.bool_params import recognised_bool
+    from src.utils.resolve_versions import at_least
+
+    requested = recognised_bool(high)
+    if requested is None:
+        return {
+            "success": False,
+            "refused": True,
+            "error": "high must be a boolean (true for high priority, false for normal)",
+        }
+    try:
+        version = resolve_obj.GetVersion()
+    except Exception:  # noqa: BLE001 — an unreadable version routes as unknown
+        version = None
+    typed = at_least(version, HIGH_PRIORITY_TYPED_FLOOR)
+    base: Dict[str, Any] = {
+        "high_priority": requested,
+        "resolve_version": version,
+        "readback": None,
+        "note": _NO_READBACK_NOTE,
+    }
+
+    def _typed_call() -> Dict[str, Any]:
+        ok = bool(resolve_obj.SetHighPriority(requested))
+        out = dict(base, success=ok, signature="SetHighPriority(bool)", reversible=True)
+        if not ok:
+            out["warning"] = (
+                "SetHighPriority returned False. On 21.1 that is the answer to a "
+                "rejected call; the priority is most likely unchanged, but it "
+                "cannot be read back to confirm."
+            )
+        return out
+
+    def _legacy_call() -> Dict[str, Any]:
+        if not requested:
+            return dict(
+                base,
+                success=False,
+                refused=True,
+                signature="SetHighPriority()",
+                reversible=False,
+                error=(
+                    "This Resolve build takes SetHighPriority() with no argument and "
+                    "can only RAISE priority; it cannot be lowered back to normal "
+                    "without restarting Resolve (Resolve 21.1+ accepts a boolean). "
+                    "Nothing was called."
+                ),
+            )
+        ok = bool(resolve_obj.SetHighPriority())
+        return dict(base, success=ok, signature="SetHighPriority()", reversible=False)
+
+    if typed is True:
+        return _typed_call()
+    if typed is False:
+        return _legacy_call()
+    # Version unreadable: try the typed form and fall back only on the
+    # signature mismatch an older build raises, never on a False return.
+    try:
+        return _typed_call()
+    except TypeError:
+        return _legacy_call()

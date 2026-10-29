@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import src.server as compound
 from src.utils import operation_log, operation_result
@@ -243,7 +244,11 @@ class OperationLogSetup(unittest.TestCase):
         self.assertTrue(cleared["success"])
         destructive = cleared["defaults"]["destructive"]
         self.assertTrue(destructive["operation_log"])
-        self.assertTrue(destructive["operation_log_path"].endswith("logs/operation-log.jsonl"))
+        # Path parts, not a "/" suffix: the default is built with pathlib, so it
+        # uses backslashes on Windows.
+        self.assertEqual(
+            Path(destructive["operation_log_path"]).parts[-2:], ("logs", "operation-log.jsonl")
+        )
 
 
 if __name__ == "__main__":

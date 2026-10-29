@@ -28,6 +28,7 @@ import sys
 import time
 
 from src.utils.private_state import private_state_dir, write_private_json
+from src.utils.proc import windows_pid_alive
 
 logger = logging.getLogger("davinci-resolve-mcp")
 
@@ -172,6 +173,12 @@ def read_transport_state():
         return None
     pid = state.get("pid")
     if isinstance(pid, int):
+        if os.name == "nt":
+            # os.kill(pid, 0) is TerminateProcess on Windows, not a probe: the
+            # state file normally names the running server itself.
+            if windows_pid_alive(pid) is not True:
+                return None
+            return state
         try:
             os.kill(pid, 0)
         except (OSError, ProcessLookupError):

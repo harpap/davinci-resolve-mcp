@@ -35,7 +35,7 @@ if __name__ == "__main__":
     try:
         connect_at_startup()
         start_background_update_check(VERSION, project_dir, logger)
-        logger.info(f"Starting DaVinci Resolve MCP Server v{VERSION} (389 granular tools)")
+        logger.info(f"Starting DaVinci Resolve MCP Server v{VERSION} (390 granular tools)")
         run_fastmcp_stdio(mcp)
     except KeyboardInterrupt:
         logger.info("Server shutdown requested")
