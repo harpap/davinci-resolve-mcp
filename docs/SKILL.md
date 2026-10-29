@@ -6,6 +6,27 @@ common workflow patterns, error recovery, and known gotchas.
 
 ---
 
+## Keep each video project in its own folder
+
+Before creating artifacts for a new Resolve project, create or select one
+unique project folder under the configured `davinci-resolve-mcp-analysis` root
+(for example, `<project-slug>-<project-id>/`). Reuse it for later sessions of the
+same project; use a different folder for every new project.
+
+Keep all project-specific files inside that folder: analysis reports and
+databases, sampled frames, contact sheets, briefs, selects, cut manifests,
+finishing notes, downloaded music, diagnostics, and delivery support files.
+Use subfolders for tasks and versions instead of separate sibling folders.
+Do not scatter project artifacts across the repository or mix projects.
+Respect configured safe paths; never move, copy, or modify source media merely
+to satisfy this layout.
+
+The project folder must be the single cleanup unit so the user can remove its
+artifacts by deleting one folder. Keep shared registries limited to indexes
+and remove stale entries when deleting project artifacts. Keep reusable craft
+preferences separate from project-specific notes. Report the project folder
+path when starting work and in the final handoff.
+
 ## What This Server Does
 
 The DaVinci Resolve MCP server bridges AI assistants to DaVinci Resolve Studio
