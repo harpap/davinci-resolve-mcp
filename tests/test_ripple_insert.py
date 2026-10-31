@@ -29,6 +29,9 @@ class MediaPoolItemStub:
     def GetName(self):
         return self.name
 
+    def GetClipProperty(self, key):
+        return 24 if key == "FPS" else None
+
 
 class FolderStub:
     def __init__(self, clips=None):
@@ -101,6 +104,9 @@ class TimelineStub:
     def __init__(self, items=None, locked=False):
         self.tracks = {("video", 1): list(items or [])}
         self.locked = locked
+
+    def GetSetting(self, key):
+        return "24"
 
     def GetName(self):
         return "Sandbox"
@@ -250,15 +256,14 @@ class RippleInsertPlanTest(unittest.TestCase):
     def test_locked_track_with_tail_is_refused(self):
         proj, tl, _, _ = _ripple_fixture(locked=True)
         out = s._timeline_ripple_insert_impl(proj, tl, _insert_params())
-        self.assertFalse(out["success"])
-        self.assertEqual(out["plan"]["locked_tracks_with_tail"], ["video:1"])
+        self.assertEqual(out["error"]["code"], "TRACK_LOCKED")
 
-    def test_tail_without_pool_media_is_refused(self):
+    def test_tail_without_pool_media_is_preserved_natively(self):
         proj, tl, _, items = _ripple_fixture()
         items[2].mpi = None
         out = s._timeline_ripple_insert_impl(proj, tl, _insert_params())
-        self.assertFalse(out["success"])
-        self.assertEqual(len(out["plan"]["blockers"]), 1)
+        self.assertTrue(out["success"])
+        self.assertEqual(out["plan"]["blockers"], [])
 
 
 class RippleInsertExecuteTest(unittest.TestCase):
@@ -268,38 +273,61 @@ class RippleInsertExecuteTest(unittest.TestCase):
     def test_execute_requires_confirm_token(self):
         proj, tl, _, _ = _ripple_fixture()
         params = _insert_params(dry_run=False)
-        with mock.patch.object(s, "_confirm_token_required", return_value=True):
+        with mock.patch.object(s, "_confirm_token_required", return_value=True), mock.patch(
+            "src.utils.native_ripple.execute", return_value={"success": True}
+        ) as execute:
             first = s._timeline_ripple_insert_impl(proj, tl, params)
             self.assertEqual(first["status"], "confirmation_required")
             self.assertEqual(first["preview"]["operation"], "timeline.ripple_insert")
+            execute.assert_not_called()
 
             confirmed = s._timeline_ripple_insert_impl(
                 proj, tl, dict(params, confirm_token=first["confirm_token"])
             )
         self.assertTrue(confirmed["success"])
 
-    def test_execute_rebuilds_layout_and_restores_properties(self):
-        proj, tl, _, _ = _ripple_fixture(tail_props={"ZoomX": 0.5, "ZoomY": 0.5})
-        params = _insert_params(dry_run=False)
-        with mock.patch.object(s, "_confirm_token_required", return_value=False):
-            out = s._timeline_ripple_insert_impl(proj, tl, params)
-
+    def test_execute_delegates_without_deleting_original_items(self):
+        proj, tl, mp, items = _ripple_fixture(tail_props={"ZoomX": 0.5})
+        with mock.patch.object(s, "_confirm_token_required", return_value=False), mock.patch(
+            "src.utils.native_ripple.execute", return_value={"success": True, "timeline_id": "revision"}
+        ) as execute:
+            out = s._timeline_ripple_insert_impl(proj, tl, _insert_params(dry_run=False))
         self.assertTrue(out["success"])
-        self.assertEqual(out["shift_frames"], 24)
-        self.assertEqual(out["tail_items_shifted"], 2)
-        self.assertEqual(out["readback"]["missing"], [])
-        layout = [
-            (item.GetStart(), item.GetDuration())
-            for item in tl.GetItemListInTrack("video", 1)
-        ]
-        self.assertEqual(
-            layout,
-            [(86400, 48), (86448, 24), (86472, 48), (86520, 48)],
-        )
-        self.assertEqual(out["properties_restored_items"], 1)
-        self.assertEqual(out["property_restore_failures"], 0)
-        shifted_tail = tl.GetItemListInTrack("video", 1)[-1]
-        self.assertEqual(shifted_tail.GetProperty("ZoomX"), 0.5)
+        self.assertEqual(tl.GetItemListInTrack("video", 1), items)
+        self.assertEqual(mp.append_count, 0)
+        self.assertEqual(execute.call_args.args[4]["shift_frames"], 24)
+
+    def test_source_rate_is_converted_to_timeline_frames(self):
+        proj, tl, mp, _ = _ripple_fixture()
+        mp.root.clips[-1].GetClipProperty = lambda key: 48
+        plan = s._timeline_ripple_insert_impl(proj, tl, _insert_params())["plan"]
+        self.assertEqual(plan["shift_frames"], 12)
+        self.assertEqual(plan["inserts"][0]["source_fps"], 48)
+
+    def test_unknown_source_rate_refuses_before_execution(self):
+        proj, tl, mp, _ = _ripple_fixture()
+        mp.root.clips[-1].GetClipProperty = lambda key: None
+        out = s._timeline_ripple_insert_impl(proj, tl, _insert_params(dry_run=False))
+        self.assertIn("source frame rate", out["error"]["message"])
+        self.assertEqual(mp.append_count, 0)
+
+    def test_fractional_record_duration_is_truncated_not_rounded(self):
+        proj, tl, mp, _ = _ripple_fixture()
+        tl.GetSetting = lambda key: "29.97"
+        mp.root.clips[-1].GetClipProperty = lambda key: 30
+        params = _insert_params()
+        params["clip_infos"][0]["end_frame"] = 243
+        plan = s._timeline_ripple_insert_impl(proj, tl, params)["plan"]
+        self.assertEqual(plan["shift_frames"], 242)
+
+    def test_equal_fractional_rates_keep_all_source_frames(self):
+        proj, tl, mp, _ = _ripple_fixture()
+        tl.GetSetting = lambda key: "29.97"
+        mp.root.clips[-1].GetClipProperty = lambda key: 29.97
+        params = _insert_params()
+        params["clip_infos"][0]["end_frame"] = 593
+        plan = s._timeline_ripple_insert_impl(proj, tl, params)["plan"]
+        self.assertEqual(plan["shift_frames"], 593)
 
 
 class DuplicateVerifiedGateTest(unittest.TestCase):

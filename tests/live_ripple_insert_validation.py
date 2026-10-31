@@ -145,6 +145,8 @@ def run(server, media_path: Path, keep_open: bool) -> int:
     if current:
         previous_project = current.GetName()
         print(f"current project before run: {previous_project}")
+        if not pm.SaveProject():
+            raise AssertionError("Could not save outgoing project")
 
     created = False
     failures = []
@@ -215,6 +217,11 @@ def run(server, media_path: Path, keep_open: bool) -> int:
             result = first
         assert result["success"] is True, result
         assert result["readback"]["missing"] == [], result
+        # Native insertion retains the original and selects a new revision.
+        original_tl = tl
+        tl = project.GetCurrentTimeline()
+        assert tl.GetUniqueId() != original_tl.GetUniqueId()
+        assert _layout(original_tl) == before
         after = _layout(tl)
         expected_after = [(tl_start, 48), (tl_start + 48, 24),
                           (tl_start + 72, 48), (tl_start + 120, 48)]
@@ -225,9 +232,7 @@ def run(server, media_path: Path, keep_open: bool) -> int:
         zy = shifted_tail.GetProperty("ZoomY")
         if not (abs(float(zx) - 0.5) < 0.001 and abs(float(zy) - 0.5) < 0.001):
             raise AssertionError(f"property survival failed: ZoomX={zx} ZoomY={zy}")
-        print(f"PHASE 1 PASS: layout {after}, ZoomX/Y=0.5 survived, "
-              f"restored={result['properties_restored_items']} "
-              f"restore_failures={result['property_restore_failures']}")
+        print(f"PHASE 1 PASS: layout {after}, ZoomX/Y=0.5 survived; original retained")
 
         # ---- Phase 2: Fusion render isolation ---------------------------
         tl2 = media_pool.CreateEmptyTimeline("FusionIso")

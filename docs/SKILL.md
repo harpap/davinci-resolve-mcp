@@ -1775,14 +1775,18 @@ Key actions:
   'AppendToTimeline null-id'). NEVER use `move_clips` to open a gap for an
   insert; that is `ripple_insert`'s job.
 - `ripple_insert(clip_infos, record_frame|record_timecode, record_frame_mode?,
-  dry_run?, confirm_token?)` — insert media-pool source ranges at a record point
-  and shift ALL later video/audio items right. DRY-RUN by default (full plan
-  with straddler/blocker detection); executing is confirm-token gated and
-  archives the timeline first. Shifted items are re-created from pool media
-  with transform/crop/composite/retime re-applied; grades, keyframes,
-  transitions, and link state on shifted items are NOT preserved (the archive
-  keeps them). Refuses mid-item insert points, non-pool items in the tail
-  (titles/generators/Fusion comps), subtitle shifts, and locked tracks.
+  revision_name?, dry_run?, confirm_token?)` — open a gap and insert source
+  ranges in a NEW native DRT revision; retain the original. DRY-RUN by default,
+  execution confirm-token gated. Only record positions change in existing native
+  item payloads, preserving their opaque grade/Fusion/retime/keyframe/link data
+  in the patched archive. Verify readable state, sources, links, markers and
+  insertion geometry after import; restore the original on failure. The returned
+  `timeline_id` identifies the new revision. Source durations convert to timeline
+  fps. `media_type=1` (default) is picture only; add a matching `media_type=2` row
+  for linked sound. Refuse crossing clips/transitions, affected subtitles, locked
+  tracks and nested-sequence DRTs. No lossy rebuild fallback. Rendered output and
+  opaque payloads after import still require separate verification. See the
+  [edit kernel](kernels/timeline-edit-kernel.md#ripple-insertion-with-edit-preservation).
 - `copy_range` / `duplicate_range` — copy exact video/audio source segments
   from `start_frame`/`end_frame` or mark in/out to `record_frame`
 - `overwrite_range` — delete whole destination overlaps, then copy the exact

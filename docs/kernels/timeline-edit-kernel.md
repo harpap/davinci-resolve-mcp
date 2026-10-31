@@ -70,7 +70,46 @@ first, then deletes the original source items.
 item when Resolve exposes linked item handles. The kernel restores the
 video/audio link state on the duplicated items.
 
-### Range operations
+### Ripple insertion with edit preservation
+
+`timeline(action="ripple_insert")` opens a gap at an item boundary and places
+the requested source ranges into a **new native timeline revision**. The original
+timeline is retained. The operation exports a native `.drt`, changes only direct
+item record positions, and imports it into the same project. Existing item
+payloads (including grades, retimes, Fusion, keyframes, and links) are copied
+byte-for-byte into the patched archive, instead of reconstructing clips through
+`AppendToTimeline`. No source media is written.
+
+Planning defaults to `dry_run=true`. Execution takes the confirmation token and
+optionally `revision_name`; the returned `timeline_id` is the new revision, not
+the original timeline ID. Readable item state, source ranges, link topology,
+markers and insert geometry are checked; an unsuccessful revision restores the
+original as current and retains diagnostic files. Unknown native layouts are
+refused, with no fallback to the former lossy rebuild.
+
+Source `start_frame`/`end_frame` are end-exclusive, measured at the media frame
+rate. Insert duration is converted to the timeline frame rate, truncating a
+fractional record frame as positioned native append does (243 source frames
+at 30 fps occupy 242 frames at 29.97 fps, measured on Studio 21.1). The default
+`media_type=1` inserts picture only; supply a matching `media_type=2` row to
+insert sound on the chosen audio track. Matching inserted A/V pairs are linked.
+Every existing track shifts by the longest inserted run; unfilled tracks are
+reported as gaps. Timeline markers shift with the edit; clip markers stay local.
+
+Current conservative boundaries: insertion through a clip/transition, affected
+subtitle tracks, locked destination/tail tracks, and native archives containing
+nested sequences are refused. Track automation and rendered output are not
+verified by the operation. Native payload preservation before import is distinct
+from proving every opaque effect after Resolve imports it; inspect rendered
+frames for the actual edit.
+
+Live regression command (synthetic media and a disposable project only):
+
+```bash
+RESOLVE_VERIFY=1 venv/bin/python tests/live_native_ripple_validation.py
+```
+
+### Copying and lifting ranges
 
 The range tools build exact append operations from overlapping source segments:
 

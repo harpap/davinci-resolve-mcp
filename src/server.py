@@ -5813,19 +5813,6 @@ def _timeline_duplicate_clips_impl(proj, tl, p: Dict[str, Any], *, delete_source
     return out
 
 
-# Timeline-item properties re-applied to shifted items after a ripple_insert
-# rebuild. Grades, keyframes, transitions, Fusion comps, and link state are NOT
-# in this list because the scripting API cannot read them off a live item in a
-# form that can be written back (the pre-mutation archive preserves them).
-_RIPPLE_RESTORE_PROPERTY_KEYS = (
-    "Pan", "Tilt", "ZoomX", "ZoomY", "ZoomGang", "RotationAngle",
-    "AnchorPointX", "AnchorPointY", "Pitch", "Yaw", "FlipX", "FlipY",
-    "CropLeft", "CropRight", "CropTop", "CropBottom", "CropSoftness", "CropRetain",
-    "CompositeMode", "Opacity", "Distortion", "Scaling", "ResizeFilter",
-    "RetimeProcess", "MotionEstimation",
-)
-
-
 def _ripple_item_row(item, track_type, track_index):
     start = _frame_int(item.GetStart())
     end = _frame_int(item.GetEnd())
@@ -6240,18 +6227,10 @@ def _timeline_replace_source_range_impl(proj, tl, p: Dict[str, Any], *, resolve=
 
 
 def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -> Dict[str, Any]:
-    """Insert clip_infos at a record frame and shift all later items right.
+    """Plan an insertion, then import a verified native DRT revision.
 
-    There is no ripple-insert primitive in the scripting API, and shifting items
-    by duplicate-then-delete corrupts the timeline when the shift is smaller
-    than an item (AppendToTimeline into an occupied span returns null-id items;
-    the Portugal 2026-08-19 session lost 26 clips that way). This action instead
-    plans a rebuild: capture every later item's pool media + source trim, delete
-    the tail (verified, non-ripple), re-append it shifted, then place the
-    inserts into the opened gap. Tail is re-appended BEFORE the inserts so the
-    worst mid-failure state is the original content with a gap, never lost tail.
-    DRY-RUN by default; executing is confirm-token gated and the destructive
-    hook archives the timeline first.
+    The original timeline is retained. Never rebuild existing items through
+    AppendToTimeline: it loses opaque state and changes retimed source ranges.
     """
     clip_infos = p.get("clip_infos") or p.get("clipInfos")
     if not isinstance(clip_infos, list) or not clip_infos:
@@ -6294,6 +6273,9 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
             return err
 
     # Build insert clipInfos back-to-back from the insert point (per-track cursors).
+    timeline_fps, fps_error = _timeline_fps(tl)
+    if fps_error or not timeline_fps or timeline_fps <= 0:
+        return fps_error or _err("Invalid timeline frame rate")
     built_inserts = []
     insert_summaries = []
     cursor_by_track: Dict[Any, int] = {}
@@ -6305,6 +6287,14 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
         ci.pop("recordFrame", None)
         track_index = ci.get("trackIndex", ci.get("track_index", 1))
         media_type = ci.get("mediaType", ci.get("media_type", 1))
+        if (type(track_index) is not int or track_index < 1
+                or type(media_type) is not int or media_type not in (1, 2)):
+            return _err("track_index must be a positive integer and media_type must be 1 or 2")
+        track_type = "video" if media_type == 1 else "audio"
+        if track_index > _timeline_track_count(tl, track_type):
+            return _err(f"Insert destination {track_type}:{track_index} does not exist")
+        if _timeline_locked_tracks(tl, [(track_type, track_index)]):
+            return _err(f"Insert destination {track_type}:{track_index} is locked", code="TRACK_LOCKED")
         ci["track_index"] = track_index
         ci["media_type"] = media_type
         key = (int(media_type), int(track_index))
@@ -6314,15 +6304,27 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
         info, ierr = _build_append_clip_info_dict(root, ci, idx, tl_start)
         if ierr:
             return ierr
-        duration = int(info["endFrame"]) - int(info["startFrame"])
-        if duration <= 0:
+        sf, ef = info["startFrame"], info["endFrame"]
+        if type(sf) is not int or type(ef) is not int or sf < 0 or ef <= sf:
             return _err(f"clip_infos[{idx}] has non-positive duration (end_frame is end-exclusive)")
+        source_fps = _media_item_source_fps(info["mediaPoolItem"])
+        if not source_fps:
+            return _err(f"clip_infos[{idx}]: cannot read source frame rate")
+        # Positioned AppendToTimeline truncates fractional record durations
+        # (243 source frames at 30 fps -> 242 at 29.97, Studio 21.1).
+        # Rational arithmetic avoids dropping a frame for equal decimal rates.
+        from fractions import Fraction
+        duration = int((ef - sf) * Fraction(str(timeline_fps)) / Fraction(str(source_fps)))
+        if duration <= 0:
+            return _err(f"clip_infos[{idx}] is shorter than one timeline frame")
         cursor_by_track[key] = record + duration
         built_inserts.append(info)
         insert_summaries.append({
             "clip_id": raw_ci.get("clip_id") or raw_ci.get("media_pool_item_id"),
             "record_frame": record,
             "duration": duration,
+            "source_fps": source_fps,
+            "timeline_fps": timeline_fps,
             "track_index": int(track_index),
             "media_type": int(media_type),
         })
@@ -6372,33 +6374,6 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
             elif item_end is not None and item_end > insert_frame:
                 subtitle_blockers += 1
 
-    # Capture rebuild info + restorable properties for every tail item BEFORE
-    # anything mutates (the live item objects die at delete time).
-    tail_rows.sort(key=lambda r: (r["track_type"], r["track_index"], r["start"]))
-    linked_tail_ids: List[str] = []
-    for row in tail_rows:
-        media_type = _timeline_media_type(row["track_type"])
-        info, ierr = _append_clip_info_from_timeline_item(
-            row["item"],
-            row["track_index"],
-            record_frame=row["start"] + shift,
-            media_type=media_type,
-        )
-        if ierr:
-            blockers.append({**_ripple_public_row(row), "reason": ierr.get("error", str(ierr))})
-            continue
-        row["info"] = info
-        try:
-            full_props = row["item"].GetProperty() or {}
-        except Exception:
-            full_props = {}
-        row["props"] = {k: full_props[k] for k in _RIPPLE_RESTORE_PROPERTY_KEYS if k in full_props}
-        try:
-            if row["item"].GetLinkedItems():
-                linked_tail_ids.append(row["clip_id"])
-        except Exception:
-            pass
-
     # Every track shifts by the SAME amount (the longest inserted run), so any
     # track whose inserts are shorter than that — or which gets no insert at all
     # — is left with a gap at the insert point. That is ordinary ripple-insert
@@ -6414,18 +6389,13 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
             if filled < shift:
                 gap_by_track[f"{track_type}:{track_index}"] = shift - filled
 
-    warnings = [
-        "shifted items are re-created from pool media: grades, keyframes, transitions, "
-        "Fusion comps, and link state on them are NOT preserved (the pre-mutation archive keeps them)",
-    ]
+    warnings = []
     if gap_by_track:
         warnings.append(
             "every track shifts by the longest inserted run (%d frames); these tracks are "
             "left with a gap at the insert point: %s"
             % (shift, ", ".join(f"{track}={frames}f" for track, frames in sorted(gap_by_track.items())))
         )
-    if linked_tail_ids:
-        warnings.append(f"{len(linked_tail_ids)} shifted item(s) had linked items; links will not survive the shift")
     plan = {
         "insert_frame_absolute": insert_frame,
         "insert_frame_relative": insert_frame - tl_start,
@@ -6440,6 +6410,8 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
         "locked_tracks_with_tail": locked_tracks,
         "gap_frames_by_track": gap_by_track,
         "warnings": warnings,
+        "preservation": "native_drt_revision",
+        "original_retained": True,
     }
     feasible = not (straddlers or blockers or subtitle_blockers or locked_tracks)
     if not feasible:
@@ -6447,7 +6419,7 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
         if straddlers:
             reasons.append(f"insert point cuts through {len(straddlers)} item(s) — choose an item boundary")
         if blockers:
-            reasons.append(f"{len(blockers)} later item(s) cannot be rebuilt (no pool media: titles/generators/Fusion comps)")
+            reasons.append(f"{len(blockers)} item(s) have unreadable timing")
         if subtitle_blockers:
             reasons.append(f"{subtitle_blockers} subtitle item(s) after the insert point cannot be shifted via the API")
         if locked_tracks:
@@ -6475,8 +6447,7 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
             params=p,
             preview={
                 "operation": "timeline.ripple_insert",
-                "warning": "Deletes and re-appends every later item shifted right; grades/keyframes/"
-                           "transitions/links on shifted items are not preserved (archive keeps them).",
+                "warning": "Creates and selects a native timeline revision; the original is retained.",
                 "insert_frame_absolute": insert_frame,
                 "shift_frames": shift,
                 "inserted_clips": len(built_inserts),
@@ -6487,136 +6458,9 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
     if blocked:
         return blocked
 
-    # Execute: delete tail -> re-append tail shifted -> place inserts into the gap.
-    # Hold the Edit page once for the whole rebuild: the delete's own guard
-    # nests harmlessly inside, and the appends/restores run without a page
-    # flip per call.
-    tail_items = [row["item"] for row in tail_rows]
-    with _edit_page_for_timeline_edits(resolve):
-        if tail_items and not _timeline_delete_clips_verified(tl, tail_items, False, resolve=resolve):
-            return _err(
-                "ripple_insert aborted before any change: tail items could not be removed "
-                "for re-placement (delete readback still finds them)",
-                code="RIPPLE_DELETE_FAILED",
-                category="resolve_api",
-                remediation="Check track locks and retry; the timeline is unchanged.",
-            )
-        failures: List[Dict[str, Any]] = []
-        for row in tail_rows:
-            try:
-                out_items = mp.AppendToTimeline([row["info"]])
-            except Exception as exc:
-                out_items = None
-                row["append_error"] = str(exc)
-            if not out_items:
-                failures.append({**_ripple_public_row(row),
-                                 "stage": "tail_reappend",
-                                 "expected_start": row["start"] + shift,
-                                 "error": row.get("append_error", "AppendToTimeline returned no item")})
-        for idx, info in enumerate(built_inserts):
-            try:
-                out_items = mp.AppendToTimeline([info])
-            except Exception as exc:
-                out_items = None
-                insert_summaries[idx]["append_error"] = str(exc)
-            if not out_items:
-                failures.append({**insert_summaries[idx], "stage": "insert"})
-
-        # Restore captured transform/crop/composite/retime properties on shifted items.
-        restored = 0
-        restore_failures = 0
-        by_track: Dict[Any, Dict[int, Any]] = {}
-        for track_type in ("video", "audio"):
-            for track_index in range(1, _timeline_track_count(tl, track_type) + 1):
-                slot = by_track.setdefault((track_type, track_index), {})
-                for item in (tl.GetItemListInTrack(track_type, track_index) or []):
-                    item_start = _frame_int(item.GetStart())
-                    if item_start is not None:
-                        slot[item_start] = item
-        for row in tail_rows:
-            if not row.get("props"):
-                continue
-            new_item = by_track.get((row["track_type"], row["track_index"]), {}).get(row["start"] + shift)
-            if new_item is None:
-                restore_failures += 1
-                continue
-            applied_any = False
-            for key, value in row["props"].items():
-                if value is None:
-                    continue
-                # Fresh appends carry default values for most keys — only write the
-                # ones that actually differ (some keys reject their own defaults).
-                try:
-                    if new_item.GetProperty(key) == value:
-                        continue
-                except Exception:
-                    pass
-                try:
-                    if new_item.SetProperty(key, value):
-                        applied_any = True
-                    else:
-                        restore_failures += 1
-                except Exception:
-                    restore_failures += 1
-            if applied_any:
-                restored += 1
-
-    # Full readback: every expected (start, duration) must exist on its track.
-    expected: Dict[Any, List[Dict[str, Any]]] = {}
-    for row in head_rows:
-        expected.setdefault((row["track_type"], row["track_index"]), []).append(
-            {"start": row["start"], "duration": row["duration"], "role": "head"})
-    for row in tail_rows:
-        expected.setdefault((row["track_type"], row["track_index"]), []).append(
-            {"start": row["start"] + shift, "duration": row["duration"], "role": "shifted"})
-    for summary in insert_summaries:
-        media_type = summary["media_type"]
-        track_type = "video" if media_type == 1 else "audio"
-        expected.setdefault((track_type, summary["track_index"]), []).append(
-            {"start": summary["record_frame"], "duration": summary["duration"], "role": "insert"})
-    missing: List[Dict[str, Any]] = []
-    after_counts: Dict[str, int] = {}
-    for (track_type, track_index), rows in expected.items():
-        live = {}
-        for item in (tl.GetItemListInTrack(track_type, track_index) or []):
-            row = _ripple_item_row(item, track_type, track_index)
-            live[row["start"]] = row["duration"]
-        after_counts[f"{track_type}:{track_index}"] = len(
-            tl.GetItemListInTrack(track_type, track_index) or [])
-        for exp in rows:
-            if live.get(exp["start"]) != exp["duration"]:
-                missing.append({"track": f"{track_type}:{track_index}", **exp,
-                                "found_duration": live.get(exp["start"])})
-    success = not failures and not missing
-    result = {
-        "success": success,
-        "dry_run": False,
-        "insert_frame_absolute": insert_frame,
-        "shift_frames": shift,
-        "inserted_clips": len(built_inserts),
-        "tail_items_shifted": len(tail_rows),
-        "properties_restored_items": restored,
-        "property_restore_failures": restore_failures,
-        "readback": {"after_counts": after_counts, "missing": missing},
-        "gap_frames_by_track": gap_by_track,
-        "warnings": warnings,
-        # Semantic delta for the operation envelope. Declared rather than
-        # inferred: this action deletes and re-appends the tail to move it, so
-        # a reader counting raw API calls would see a deletion that the edit
-        # did not make.
-        "_changes": {
-            "items_added": len(built_inserts),
-            "items_moved": len(tail_rows),
-            "items_deleted": 0,
-        },
-    }
-    if failures:
-        result["failures"] = failures
-        result["remediation"] = (
-            "Some items failed to re-append; the pre-mutation archive holds the full original "
-            "timeline — inspect timeline_versioning list_versions / rollback_to_version."
-        )
-    return result
+    from src.utils.native_ripple import execute
+    return execute(resolve, proj, tl, built_inserts, plan, _resolve_safe_dir,
+                   revision_name=p.get("revision_name"))
 
 
 def _range_frames_from_params(tl, p: Dict[str, Any]):
@@ -27650,19 +27494,22 @@ def timeline(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
         off (mixed-fps) is corrected and retried. Locked track: TRACK_LOCKED unless
         unlock_track=true (re-locked after). Confirm-token gated, timeline archived first.
         Not carried: retime, Inspector keyframes, Fusion comps (refused), linked audio.
-      ripple_insert(clip_infos, record_frame|record_timecode, record_frame_mode?, dry_run?, confirm_token?) -> {success, plan | readback}
+      ripple_insert(clip_infos, record_frame|record_timecode, record_frame_mode?, revision_name?, dry_run?, confirm_token?) -> {success, plan | readback}
         Insert media-pool source ranges at a record point and shift ALL later video/audio
-        items right by the inserted duration. DRY-RUN by default (returns the full plan);
-        executing is DESTRUCTIVE — confirm-token gated, timeline version archived first.
+        items right by the inserted duration in a NEW native DRT revision. The original
+        timeline is retained. DRY-RUN by default; execution is confirm-token gated.
         clip_infos rows: {clip_id|media_pool_item_id, start_frame, end_frame (SOURCE,
-        end-exclusive), track_index?, media_type?} placed back-to-back at the insert point.
+        end-exclusive), track_index?, media_type?} placed back-to-back per track. media_type
+        defaults to 1 (video); add a matching media_type=2 row for source sound. Matching
+        inserted video/audio pairs are linked. Source duration is converted to timeline fps.
         record_frame is relative to timeline start by default (record_frame_mode
-        absolute|auto accepted); record_timecode takes timeline 'HH:MM:SS:FF'. Refuses when
-        the insert point cuts through an item, when shifted items lack pool media
-        (titles/generators/Fusion comps), when subtitle items would need shifting, or when
-        a locked track holds tail items. Shifted items are re-created from pool media with
-        transform/crop/composite/retime re-applied; grades, keyframes, transitions, and
-        link state on shifted items are NOT preserved (the pre-mutation archive keeps them).
+        absolute|auto accepted); record_timecode takes timeline 'HH:MM:SS:FF'. Native
+        item payloads are byte-preserved while record positions change. Readable state,
+        source ranges, links, markers and insertion geometry are verified after import.
+        Refuses crossing items/transitions, shifted subtitles, locked destinations/tails,
+        and native exports with nested sequences. No lossy rebuild fallback. On failure
+        the original is reselected; on success timeline_id identifies the new revision.
+        Rendered pixels and opaque payloads after import are not verified by the action.
         # example: action_help(name='<action_name>')
       copy_range/duplicate_range(start_frame, end_frame, record_frame, ...) -> {results, count}
       overwrite_range(start_frame, end_frame, record_frame, ...) -> {results, count}

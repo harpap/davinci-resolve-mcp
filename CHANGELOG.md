@@ -2,6 +2,17 @@
 
 Release history for the DaVinci Resolve MCP Server. The latest release is summarized in the root README; older entries live here to keep the README focused.
 
+## Unreleased
+
+- `timeline.ripple_insert` now creates a verified native DRT revision instead
+  of deleting and rebuilding existing clips. Original timelines remain intact;
+  opaque item payloads are retained in the patched archive, and readable state,
+  source ranges, links, markers and insertion geometry are checked after import.
+  Failures restore the original timeline. Mixed-rate source durations are
+  converted to timeline frames and paired picture/sound inserts are linked.
+  Nested sequences and crossing clips/transitions are refused without a lossy
+  fallback. Returned `timeline_id` identifies the new revision.
+
 ## What's New in v4.16.0 — Calls name their timeline, and failures say so
 
 Eight reports from a Studio 21.1 / Windows deployment (#320–#327) and the
