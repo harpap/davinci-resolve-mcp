@@ -81,6 +81,9 @@ _Not yet captured._
   those edits. Markers are supporting evidence, not a substitute for the
   requested timeline changes. Preserve the editor's explicit cursor boundary
   and follow the existing example clips' destination track.
+- For rapid conversational exchanges, refine routing with local level
+  thresholds and short boundary handles. Broad loudness regions can carry a
+  quieter reply onto the louder speaker's track; preserve those quick returns.
 - After an interrupted, delayed, or failed editing call, stop and inspect the
   actual Resolve timeline and representative rendered frames before retrying.
   Clips can appear even when the call has not returned; assuming failure can
