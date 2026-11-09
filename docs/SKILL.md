@@ -805,7 +805,7 @@ Key actions:
   rough cut, match a grade), `guide`, `kernel` (per-surface tool maps), `reference`
   (exhaustive ledgers including this document), `repo` (contributing here)
 - `get(topic, section?, inline?)` — the resolved prose. Natural aliases work
-  (`"tighten"`, `"dead air"`, `"grading"`, `"conform"`). Referenced guides and kernels
+  (`"tighten"`, `"dead air"`, `"grading"`, `"conform"`, `"insta360"`). Referenced guides and kernels
   arrive inlined, so a client with no checkout of this repository still gets the
   manual, not a path to it. `section` returns one heading's subtree
 - `search(query, limit?)` — ranked topics with excerpts

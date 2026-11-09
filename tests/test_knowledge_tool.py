@@ -135,6 +135,8 @@ class TestResolution(unittest.TestCase):
         self.assertEqual(knowledge.get("dead air")["topic"], "resolve-tighten-recording")
         self.assertEqual(knowledge.get("grading")["topic"], "resolve-color")
         self.assertEqual(knowledge.get("DEAD_AIR")["topic"], "resolve-tighten-recording")
+        self.assertEqual(knowledge.get("insta360")["topic"], "resolve-insta360-audio")
+        self.assertEqual(knowledge.get("dual track audio")["topic"], "resolve-insta360-audio")
 
     def test_unknown_topic_names_near_matches(self):
         with self.assertRaises(knowledge.KnowledgeError) as caught:

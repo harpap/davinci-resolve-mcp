@@ -10,6 +10,9 @@ Thin router; depth stays in the kernel.
   `timeline` audio/Fairlight boundary).
 - **Offline planning + bus routing** — `resolve-advanced/README.md` →
   `audio_plan`, `fairlight`, `audio`.
+- **Insta360 camera + external microphone extraction** — use
+  `resolve-insta360-audio` (`.agents/skills/resolve-insta360-audio/SKILL.md`)
+  for separate verified WAV pairs from dual-track INSV/camera MP4 originals.
 
 ## Rough mix before anything else
 

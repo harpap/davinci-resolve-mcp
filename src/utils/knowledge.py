@@ -129,6 +129,8 @@ _ALIASES: Dict[str, str] = {
     "silences": "resolve-tighten-recording",
     "pauses": "resolve-tighten-recording",
     "audio": "resolve-audio",
+    "insta360": "resolve-insta360-audio",
+    "dual track audio": "resolve-insta360-audio",
     "sound": "resolve-audio",
     "mix": "resolve-audio",
     "mixing": "resolve-audio",
