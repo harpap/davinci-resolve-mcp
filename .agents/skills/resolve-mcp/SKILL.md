@@ -85,6 +85,12 @@ offer the call and let it fail.
 
 ## Cross-cutting rules (always)
 
+- **Clean up experiment timelines**: record the project's timeline IDs before
+  experimenting and track timelines created during the task, including automatic
+  archives. After verifying the final result, delete temporary experiments and
+  superseded trial variants, retain the delivered result and pre-existing user
+  timelines, verify the remaining list, and save. Preserve any sole recovery copy
+  outside the live timeline list before cleanup. See `house-style` for the rule.
 - **Source media is sacred** (AGENTS.md): never modify, transcode, convert, proxy,
   relink, or derive source media unless explicitly asked. Outputs go to sidecars,
   scratch, or the analysis project root.

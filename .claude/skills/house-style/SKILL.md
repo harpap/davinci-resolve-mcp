@@ -77,6 +77,13 @@ _Not yet captured._
 
 ## Resolve execution and snag handling
 
+- Delete temporary experiment timelines and superseded trial variants after
+  verifying the finished result, including auto-created timeline archives from
+  that task. Keep the delivered timeline and the user's pre-existing timelines;
+  do not leave experiments in the project as clutter. Track created timeline IDs
+  so cleanup never relies on names alone. If a temporary timeline is the only
+  recovery copy of user work, preserve that recovery outside the live timeline
+  list before deleting it. Verify cleanup and save the project before finishing.
 - When analyzed regions have been approved for cuts or track routing, perform
   those edits. Markers are supporting evidence, not a substitute for the
   requested timeline changes. Preserve the editor's explicit cursor boundary
