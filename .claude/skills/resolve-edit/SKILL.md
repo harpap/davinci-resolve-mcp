@@ -33,6 +33,7 @@ symbol. Gated in *this* domain:
 |---|---|---|
 | `Timeline.GetSelectedClips` | 21.0.4 | No selection readback. Identify clips by track/index or id instead — this repo's selection helper duck-probes three names, so it degrades to "no selection" rather than erroring |
 | `TimelineItem.SetName` | 20.2 | Clip names are read-only from a script |
+| `TimelineItem.SetSpeed` / `GetSpeed` | 21.1 | Native constant speed/readback unavailable; `SetProperty('Speed')` is not a substitute |
 
 An empty `unavailable_on_this_build` means **nothing recorded is missing**, not
 that everything exists — most of the API has never been version-bisected. A
@@ -40,10 +41,10 @@ symbol with no gate returns `unknown`, which means probe it. Probe with
 `name in dir(obj)`, never bare `hasattr`: on a Resolve object `hasattr` returns
 `True` for every name, real or invented, so it can only say yes.
 
-Distinguish *gated* from *absent*. A gated surface arrives with a newer build;
-an absent one never does, and upgrading will not help. **Clip speed / retime is
-absent on every build** — see the edit-kernel essentials below before you offer
-`set_retime` for it.
+Distinguish *gated* from *absent*. Native constant speed is available on 21.1
+through `timeline_item set_speed`. Native speed-curve setters remain absent;
+`timeline set_speed_ramp` uses a surgical native DRT revision instead. Never
+offer `set_retime` for clip speed: it changes interpolation quality only.
 
 ## Live edit-kernel essentials
 
@@ -61,13 +62,37 @@ absent on every build** — see the edit-kernel essentials below before you offe
   selection resolves by luck or not at all. Never build a destructive operation
   on "the selected clips" without reading back what you actually got — an empty
   or partial selection is indistinguishable from a small one.
-- **There is no clip-speed API at any version.** `set_retime` sets retime
-  *quality* only (`RetimeProcess`, `MotionEstimation`) and returns `True` for
-  doing so, which reads as if the retime succeeded. Setting a % speed, reversing
-  a clip, and speed ramps are all unreachable — `SetProperty('Speed'|'PlaybackSpeed'|
-  'RetimeSpeed'|'ClipSpeed')` returns `False` and the matching `GetProperty`
-  returns `None` on every build measured. Say so and route the user to the UI;
-  do not offer `set_retime` as if it answered the question (issue #132).
+- **Speed and interpolation quality are different controls.** On 21.1 use
+  `timeline_item set_speed` with `options={Percentage:300}` for constant 3x.
+  `set_retime` changes *quality* only (`RetimeProcess`, `MotionEstimation`).
+  The legacy `SetProperty('Speed'|'PlaybackSpeed'|'RetimeSpeed'|'ClipSpeed')`
+  keys remain unsupported; their failure does not establish that native
+  `SetSpeed` is absent. See `docs/reference/resolve211-speed-fades.md`.
+- **Smooth speed ramps:** `timeline set_speed_ramp` plans by default. Supply
+  `timeline_item_id` or a verified single selection, and `speed_points` with
+  increasing frames spanning the current clip's 0 through duration-1; `speed`
+  is a multiplier, so 1 means 100%, 3 means 300%. Set `dry_run=false` to create
+  and select a recoverable native DRT revision. Default `ripple=true` preserves
+  the trimmed source window to frame precision, changes duration, remaps point
+  positions proportionally, and shifts later tracks and timeline markers.
+  Explicit `ripple=false` preserves output duration instead. Include aligned
+  unlinked audio/video via `additional_item_ids`; existing links are retained.
+  Unrelated overlapping items and locked moving tracks are refused.
+  Speed changes use smoothstep easing sampled once
+  per output frame, encoded as linear source-position keyframes; these are
+  not native Bezier speed handles. Ordinary video and linked video/audio groups
+  sharing record start/duration are supported. Linked audio follows by default
+  on 21.1+; with `ripple=false`, `linked_audio="preserve"` keeps its current timing and
+  reports a sync warning. Each member retains its source offset, track and
+  links; every source extent and re-exported map is checked. WAV extents are
+  read with FFprobe when Resolve has no frame count. Nested sequences remain
+  unsupported. Inspect rendered frames separately. Live-tested on Studio
+  21.1.0.17, including an independent offset WAV on A2: six rendered video
+  samples and all 19 rendered audio beeps matched the planned timing (under
+  6 ms audio error). The `--linked --ripple` live test also verified duration
+  96 to 40 frames, eight source beeps within 4 ms, later track/marker shifts
+  and identical following-shot pixels. Older audio engines may ignore the map
+  and are refused.
 - **Routing to the UI is where issue #132 actually went wrong — and it was not
   a tool lie.** Having been told to hand off, the assistant improvised the
   handoff: it sent the user hunting for a dropdown "in the lower left of the

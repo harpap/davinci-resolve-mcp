@@ -1774,6 +1774,19 @@ Key actions:
   unverified sources are kept with a warning; see api_truth
   'AppendToTimeline null-id'). NEVER use `move_clips` to open a gap for an
   insert; that is `ripple_insert`'s job.
+- `set_speed_ramp(timeline_item_id|selected, speed_points, ripple?, additional_item_ids?, linked_audio?, dry_run?, revision_name?,
+  confirm_token?)` creates a recoverable native DRT revision with smoothstep
+  speed sampled per output frame. Ordinary video and aligned linked groups;
+  linked audio follows by default on 21.1+ (`linked_audio="preserve"` with `ripple=false`
+  leaves its timing unchanged with a sync warning). Every retimed member must
+  share record start/duration. Default `ripple=true` preserves the trimmed source
+  window to frame precision, changes duration and shifts later tracks/markers.
+  Explicit `ripple=false` preserves output duration. `additional_item_ids`
+  includes aligned unlinked audio/video. Points span the current clip's frames
+  0 through duration-1 and are proportionally remapped for the new duration,
+  with speed multipliers (1 = 100%, 3 = 300%). Plans by default;
+  `dry_run=false` applies. Each member's source bounds and re-exported mapping are checked;
+  rendered verification is separate. See the timeline edit kernel.
 - `ripple_insert(clip_infos, record_frame|record_timecode, record_frame_mode?,
   revision_name?, dry_run?, confirm_token?)` — open a gap and insert source
   ranges in a NEW native DRT revision; retain the original. DRY-RUN by default,

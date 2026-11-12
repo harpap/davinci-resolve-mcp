@@ -168,6 +168,7 @@ class RiskClassificationHook(LifecycleHook):
         # rewire what the timeline points at.
         ("timeline", "move_clips"),
         ("timeline", "ripple_insert"),
+        ("timeline", "set_speed_ramp"),
         # A slip deletes the original item and re-appends it with a new source
         # range; grade and sizing are carried, retime and Inspector keyframes
         # are not. Same rebuild shape as move_clips.

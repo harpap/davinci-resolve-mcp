@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import math
 from pathlib import Path
 import re
+import struct
 import uuid
 import zipfile
 from xml.parsers import expat
@@ -23,8 +25,8 @@ def shift_sequence(data: bytes, at: int, delta: int) -> tuple[bytes, int]:
     Expat byte offsets avoid reserializing XML (or changing binary payloads).
     Only the outer sequence's tracks are eligible, never a nested composition.
     """
-    if type(at) is not int or type(delta) is not int or delta <= 0:
-        raise ValueError("at must be an integer and delta a positive integer")
+    if type(at) is not int or type(delta) is not int or delta == 0:
+        raise ValueError("at must be an integer and delta a nonzero integer")
     parser = expat.ParserCreate()
     stack, items, patches = [], [], []
     current = None
@@ -47,11 +49,20 @@ def shift_sequence(data: bytes, at: int, delta: int) -> tuple[bytes, int]:
         if field and len(stack) == 8 and name == field[0]:
             key, begin = field
             raw = data[begin:parser.CurrentByteIndex]
-            if not re.fullmatch(rb"-?\d+", raw):
+            parts = raw.split(b"|")
+            if not re.fullmatch(rb"-?\d+", parts[0]) or len(parts) > 2:
                 raise ValueError(f"Unsupported native {key} value")
-            current[key] = int(raw)
+            fraction = 0
+            if len(parts) == 2:
+                if not re.fullmatch(rb"[0-9a-fA-F]{16}", parts[1]):
+                    raise ValueError(f"Unsupported native {key} fraction")
+                fraction = struct.unpack("<d", bytes.fromhex(parts[1].decode("ascii")))[0]
+                if not math.isfinite(fraction) or not 0 <= fraction < 1:
+                    raise ValueError(f"Unsupported native {key} fraction")
+            current[key] = int(parts[0]) + fraction
             if key == "Start":
                 current["span"] = (begin, parser.CurrentByteIndex)
+                current["start_parts"] = parts
             field = None
         if current is not None and len(stack) == 7:
             if "Start" not in current or "Duration" not in current:
@@ -69,8 +80,16 @@ def shift_sequence(data: bytes, at: int, delta: int) -> tuple[bytes, int]:
         if duration < 0 or pos < at < pos + duration:
             raise ValueError("Insert point crosses a native clip or transition")
         if pos >= at:
+            if pos + delta < 0:
+                raise ValueError("Ripple would move a native item before frame zero")
             begin, end_pos = item["span"]
-            patches.append((begin, end_pos, str(pos + delta).encode()))
+            # The optional LE-double suffix is Resolve's subframe remainder.
+            # Move whole frames only, keeping that suffix byte exact.
+            parts = item["start_parts"]
+            shifted = str(int(parts[0]) + delta).encode()
+            if len(parts) == 2:
+                shifted += b"|" + parts[1]
+            patches.append((begin, end_pos, shifted))
     for begin, end_pos, value in reversed(patches):
         data = data[:begin] + value + data[end_pos:]
     return data, len(patches)

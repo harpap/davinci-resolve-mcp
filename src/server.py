@@ -6463,6 +6463,146 @@ def _timeline_ripple_insert_impl(proj, tl, p: Dict[str, Any], *, resolve=None) -
                    revision_name=p.get("revision_name"))
 
 
+def _timeline_set_speed_ramp_impl(proj, tl, p: Dict[str, Any], *, resolve=None):
+    """Plan or create a native video retime revision; never rebuild the edit."""
+    from src.utils import speed_ramp
+    try:
+        item_id = p.get("timeline_item_id") or p.get("clip_id")
+        if item_id:
+            item = _find_timeline_item_by_id(tl, item_id)
+            if item is None:
+                raise ValueError("No timeline item with the supplied ID")
+        elif p.get("selected") is True:
+            selected, warnings = _get_selected_timeline_items(tl)
+            if len(selected) != 1 or warnings:
+                raise ValueError("Select exactly one video clip, or supply timeline_item_id")
+            item = selected[0]
+        else:
+            raise ValueError("Supply timeline_item_id or selected=true")
+        track, err = _timeline_item_track_info(item)
+        if err or track[0] != "video":
+            raise ValueError("Speed ramps support ordinary video clips only")
+        if tl.GetIsTrackLocked("video", track[1]):
+            raise ValueError("The target video track is locked")
+        audio_mode = p.get("linked_audio", "follow")
+        if audio_mode not in {"follow", "preserve"}:
+            raise ValueError("linked_audio must be follow or preserve")
+        ripple = p.get("ripple", True)
+        if type(ripple) is not bool:
+            raise ValueError("ripple must be a boolean")
+        # Resolve may return links transitively or one hop at a time. Walk the
+        # whole group before changing any member so a hidden link cannot slip.
+        group = {item.GetUniqueId(): item}
+        pending = [item]
+        additional_ids = p.get("additional_item_ids", [])
+        if not isinstance(additional_ids, list) or any(not isinstance(key, str) or not key for key in additional_ids):
+            raise ValueError("additional_item_ids must be a list of timeline item IDs")
+        for key in additional_ids:
+            extra = _find_timeline_item_by_id(tl, key)
+            if extra is None:
+                raise ValueError(f"Additional ramp item not found: {key}")
+            if key not in group:
+                group[key] = extra
+                pending.append(extra)
+        while pending:
+            for linked in _coerce_item_list(pending.pop().GetLinkedItems()):
+                key = linked.GetUniqueId()
+                if key not in group:
+                    group[key] = linked
+                    pending.append(linked)
+        duration = int(item.GetDuration())
+        points = p.get("speed_points")
+        speed_ramp.validate_points(points, duration)
+        fps, err = _timeline_fps(tl)
+        if err or not fps:
+            raise ValueError("Could not read timeline frame rate")
+        members, mappings = [], []
+        output_points, output_duration, reference_span = points, duration, None
+        for member in group.values():
+            location, err = _timeline_item_track_info(member)
+            if err or location[0] not in {"video", "audio"}:
+                raise ValueError("Linked groups support ordinary video and audio only")
+            if location[0] == "audio" and audio_mode == "preserve":
+                if ripple:
+                    raise ValueError("Ripple retiming requires associated audio to follow the ramp")
+                continue
+            if location[0] == "audio" and not _has_method(member, "SetSpeed"):
+                raise ValueError("Linked-audio speed ramps require Resolve 21.1+; older audio engines may ignore native timemaps")
+            if tl.GetIsTrackLocked(*location):
+                raise ValueError("A linked member's track is locked")
+            if int(member.GetStart()) != int(item.GetStart()) or int(member.GetDuration()) != duration:
+                raise ValueError("Linked members must share the same record start and duration")
+            media = member.GetMediaPoolItem()
+            props = media.GetClipProperty() if media else {}
+            if not props or str(props.get("Type", "")).lower() not in {"video", "video + audio", "audio"}:
+                raise ValueError("Generators, compounds, multicam and nested timelines are unsupported")
+            source_fps = _media_item_source_fps(media, props)
+            # LeftOffset is warped-domain on retimed clips, not true source.
+            source_start = _frame_int(member.GetSourceStartFrame()) if _has_method(member, "GetSourceStartFrame") else None
+            if not source_fps or source_start is None:
+                raise ValueError("Could not read exact source timing for a linked member")
+            extent = speed_ramp.source_duration_seconds(props, source_fps, location[0])
+            request = {"points": output_points, "durationFrames": output_duration,
+                       "sourceStartSec": source_start / source_fps,
+                       "sourceDurationSec": extent, "fps": fps, "uniqueId": str(_uuid.uuid4())}
+            source_end = None
+            if ripple:
+                source_end = _frame_int(member.GetSourceEndFrame()) if _has_method(member, "GetSourceEndFrame") else None
+                if source_end is None or source_end <= source_start:
+                    raise ValueError("Ripple ramps require a readable forward source in/out range")
+                span = (source_end-source_start) / source_fps
+                if reference_span is None:
+                    reference_span = span
+                    request.update(mode="ripple", sourceSpanSec=span)
+                elif abs(span-reference_span) > 1 / fps:
+                    raise ValueError("Associated items have different source durations; cannot preserve sync and source ranges")
+            mapping = speed_ramp.timemap(request)
+            if ripple and not members:
+                output_duration, output_points = mapping["durationFrames"], mapping["speedPoints"]
+            members.append({"timeline_item_id": member.GetUniqueId(), "track_type": location[0],
+                            "track_index": location[1], "start": int(member.GetStart()), "duration": duration,
+                            "new_duration": output_duration,
+                            "source_start_seconds": source_start / source_fps,
+                            "source_end_seconds": mapping["sourceEndSec"],
+                            "original_source_end_seconds": source_end/source_fps if source_end is not None else None,
+                            "source_end_error_seconds": (mapping["sourceEndSec"]-source_end/source_fps
+                                                         if source_end is not None else None)})
+            mappings.append(mapping)
+        encoded = dict(mappings[0], linked_maps=mappings[1:])
+        delta = output_duration-duration if ripple else 0
+        if ripple and delta:
+            cut, start = int(item.GetEnd()), int(item.GetStart())
+            retimed_ids = {m["timeline_item_id"] for m in members}
+            for kind in ("video", "audio", "subtitle"):
+                for index in range(1, tl.GetTrackCount(kind)+1):
+                    for other in tl.GetItemListInTrack(kind, index) or []:
+                        if other.GetUniqueId() in retimed_ids:
+                            continue
+                        other_start, other_end = int(other.GetStart()), int(other.GetEnd())
+                        if other_start < cut and other_end > start:
+                            raise ValueError(f"Ripple crosses another item ({other.GetName()}); include aligned associated items explicitly")
+                        if other_start >= cut and tl.GetIsTrackLocked(kind, index):
+                            raise ValueError("A locked track contains items that must ripple")
+        plan = {**members[0], "fps": fps, "members": members, "speed_points": output_points,
+                "requested_speed_points": points, "ripple": ripple, "shift_frames": delta,
+                "interpolation": encoded["interpolation"], "linked_audio": audio_mode,
+                "audio_retimed": any(m["track_type"] == "audio" for m in members),
+                "warnings": (["Linked audio retains its current timing; picture/source sync changes."]
+                             if audio_mode == "preserve" and len(group) > len(members) else []),
+                "original_retained": True, "duration_preserved": output_duration == duration}
+    except (ValueError, TypeError, OverflowError, OSError, subprocess.SubprocessError) as exc:
+        return _err(str(exc), code="SPEED_RAMP_REFUSED", category="invalid_input", retryable=False)
+    if _coerce_bool(p.get("dry_run"), True):
+        return {"success": True, "dry_run": True, "plan": plan}
+    if "confirm_token" not in p and _confirm_token_required():
+        return _issue_confirm_token(action="timeline.set_speed_ramp", params=p, preview=plan)
+    blocked = _consume_confirm_token(action="timeline.set_speed_ramp", params=p)
+    if blocked:
+        return blocked
+    return speed_ramp.execute(resolve, proj, tl, plan, encoded, _resolve_safe_dir,
+                              revision_name=p.get("revision_name"))
+
+
 def _range_frames_from_params(tl, p: Dict[str, Any]):
     if _coerce_bool(p.get("use_mark_in_out", p.get("useMarkInOut")), False):
         mark = tl.GetMarkInOut() or {}
@@ -6702,6 +6842,7 @@ def _timeline_edit_kernel_capabilities():
             ],
         },
         "partially_supported": {
+            "speed_ramps": "set_speed_ramp creates a recoverable native DRT revision for ordinary video and aligned associated media. Linked audio follows by default (21.1+). Default ripple=true preserves the trimmed source window to frame precision, changes duration and shifts later tracks/markers. ripple=false explicitly preserves output duration. Every source bound and imported map is checked. No native Bezier handles.",
             "audio_properties": "Resolve may reject SetProperty on some timeline audio items/builds; failures are reported per property.",
             "cache": "Color/Fusion cache state is copied only when Resolve exposes readable/writable cache APIs for the item.",
             "voice_isolation": "Copied only when Resolve exposes item-level voice isolation APIs.",
@@ -6712,7 +6853,7 @@ def _timeline_edit_kernel_capabilities():
             "transition_cloning": "Resolve's public scripting API does not expose timeline item transition cloning.",
             "razor_or_partial_lift": "Resolve's public scripting API does not expose a direct timeline split/razor primitive; partial range edits are represented by append-based copies or whole-item deletes.",
             "source_less_items": "Titles, generators, Fusion compositions, and subtitles without a MediaPoolItem cannot be cloned through AppendToTimeline clipInfo.",
-            "deep_speed_ramp_semantics": "Only exposed Speed/RetimeProcess/MotionEstimation properties and supported keyframes are copied; opaque retime curves are not independently inspectable.",
+            "deep_speed_ramp_semantics": "No native Bezier speed-curve setter or general curve-copy API. set_speed_ramp separately authors and verifies frame-sampled linear source maps through a native DRT revision.",
         },
     }
 
@@ -27391,7 +27532,7 @@ _TIMELINE_ACTIONS = [
     "add_track", "delete_track", "get_track_sub_type", "set_track_enable",
     "get_track_enabled", "set_track_lock", "get_track_locked", "get_track_name",
     "set_track_name", "get_items", "delete_clips", "set_clips_linked", "duplicate",
-    "duplicate_clips", "copy_clips", "move_clips", "ripple_insert", "replace_source_range", "copy_range", "duplicate_range",
+    "duplicate_clips", "copy_clips", "move_clips", "ripple_insert", "replace_source_range", "set_speed_ramp", "copy_range", "duplicate_range",
     "overwrite_range", "lift_range", "story_spine_report", "create_variant_from_ranges",
     "bulk_set_item_properties", "apply_look_to_items", "thumbnail_contact_sheet",
     "marker_thumbnail_review", "edit_kernel_capabilities", "probe_edit_kernel_item",
@@ -27494,6 +27635,22 @@ def timeline(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
         off (mixed-fps) is corrected and retried. Locked track: TRACK_LOCKED unless
         unlock_track=true (re-locked after). Confirm-token gated, timeline archived first.
         Not carried: retime, Inspector keyframes, Fusion comps (refused), linked audio.
+      set_speed_ramp(timeline_item_id|selected, speed_points, ripple?, additional_item_ids?, linked_audio?, revision_name?, dry_run?, confirm_token?) -> {success, plan | verification}
+        Creates/selects a native DRT revision, retaining the original. Ordinary
+        video and aligned linked media. ripple=true (default) preserves the trimmed
+        source window to frame precision, changes duration and shifts later tracks
+        and timeline markers. ripple=false explicitly preserves output duration.
+        additional_item_ids includes aligned unlinked audio/video, preserving links.
+        Linked audio follows by default (Resolve 21.1+); linked_audio='preserve'
+        requires ripple=false and reports a sync warning.
+        Every retimed member must share record start/duration; source offsets and
+        links are preserved, and each source extent/map is checked independently.
+        speed_points=[{frame:0,speed:1},...,{frame:duration-1,speed:1}];
+        frames span the current duration and are proportionally remapped to the
+        new output duration when rippling. Speed is a multiplier (3 = 300%).
+        Smoothstep speed sampled per output frame using linear native time-map
+        points; no native Bezier handles. dry_run defaults true. Source bounds
+        and the imported mapping are checked. Render verification is separate.
       ripple_insert(clip_infos, record_frame|record_timecode, record_frame_mode?, revision_name?, dry_run?, confirm_token?) -> {success, plan | readback}
         Insert media-pool source ranges at a record point and shift ALL later video/audio
         items right by the inserted duration in a NEW native DRT revision. The original
@@ -27952,6 +28109,8 @@ def timeline(action: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, 
         return _timeline_duplicate_clips_impl(proj, tl, p, delete_sources=True, resolve=get_resolve())
     elif action == "ripple_insert":
         return _timeline_ripple_insert_impl(proj, tl, p, resolve=get_resolve())
+    elif action == "set_speed_ramp":
+        return _timeline_set_speed_ramp_impl(proj, tl, p, resolve=get_resolve())
     elif action == "replace_source_range":
         return _timeline_replace_source_range_impl(proj, tl, p, resolve=get_resolve())
     elif action in {"copy_range", "duplicate_range"}:

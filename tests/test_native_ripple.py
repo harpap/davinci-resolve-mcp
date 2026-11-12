@@ -21,6 +21,22 @@ def clip(start=100, duration=40, payload=b"", tag=b"Sm2TiVideoClip"):
 
 
 class NativePatchTests(unittest.TestCase):
+    def test_signed_ripple_preserves_audio_subframe_start_and_duration_bytes(self):
+        original = sequence(clip(100,40)+clip(140,20,b'<In>7</In>',b'Sm2TiAudioClip'))
+        original = original.replace(b'<Start>140</Start>',b'<Start>140|000000000000e03f</Start>')
+        original = original.replace(b'<Duration>20</Duration>',b'<Duration>20|00feffffffffef3f</Duration>')
+        patched,count = n.shift_sequence(original,140,-24)
+        self.assertEqual(count,1)
+        self.assertEqual(patched,original.replace(b'140|000000000000e03f',b'116|000000000000e03f'))
+        with self.assertRaisesRegex(ValueError,'before frame zero'):
+            n.shift_sequence(original,140,-141)
+
+    def test_unknown_or_nonfinite_subframe_encoding_is_refused(self):
+        for suffix in (b'bad',b'000000000000f87f',b'000000000000f03f'):
+            data = sequence(clip()).replace(b'<Duration>40</Duration>',b'<Duration>40|'+suffix+b'</Duration>')
+            with self.assertRaisesRegex(ValueError,'fraction'):
+                n.shift_sequence(data,100,-24)
+
     def test_only_record_positions_change_and_opaque_state_is_byte_exact(self):
         opaque = (b'<In>31</In><FieldsBlob>abcdef</FieldsBlob><MediaTimemapBA>0102</MediaTimemapBA>'
                   b'<CompositionBA>0304</CompositionBA><Grade><Start>999</Start></Grade>'

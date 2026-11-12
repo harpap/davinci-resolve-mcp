@@ -37,7 +37,11 @@ confidently followed is worse than no rule.
 
 <!-- Hold lengths, when to cut early, what "too long" means for this material. -->
 
-_Not yet captured._
+Speed ramps should preserve the clip's trimmed source window, change its
+timeline duration, and ripple following tracks. Associated audio follows the
+same curve so the sequence actually becomes shorter or longer. Keeping the
+output duration fixed consumes a different source range and misses this intent;
+do that only when explicitly requested.
 
 ## Shot selection
 

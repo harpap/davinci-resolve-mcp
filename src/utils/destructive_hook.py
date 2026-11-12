@@ -146,6 +146,7 @@ DESTRUCTIVE_ACTIONS_BY_TOOL: Dict[str, FrozenSet[str]] = {
         "duplicate_clips",
         "copy_clips",
         "ripple_insert",
+        "set_speed_ramp",
         "replace_source_range",
         "copy_range",
         "duplicate_range",
@@ -341,6 +342,7 @@ STRICT_DEFAULT_ACTIONS: frozenset = frozenset({
 
 DRY_RUN_DEFAULT_TRUE_ACTIONS: frozenset = frozenset({
     ("timeline", "ripple_insert"),
+    ("timeline", "set_speed_ramp"),
 })
 
 
@@ -376,6 +378,7 @@ NATIVE_DRY_RUN_ACTIONS: frozenset = frozenset({
     ("timeline", "apply_cuts"),
     ("timeline", "ripple_insert"),
     ("timeline", "replace_source_range"),
+    ("timeline", "set_speed_ramp"),
     ("timeline_ai", "create_subtitles"),
     ("timeline_ai", "set_subtitle_preset"),
     ("script_plugin", "safe_install_extension"),

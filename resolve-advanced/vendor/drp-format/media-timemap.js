@@ -95,7 +95,16 @@ function _decodeKeyframes(hex) {
   // type 7"), so a Resolve-made retime read as unknown. Keyframe 0 at X=0 is
   // the origin (its Y = the source second the map starts on: 4.0 on a real
   // ramp harvest); the rest are the points.
-  const kh = String(hex).replace(/[^0-9a-fA-F]/g, '');
+  let kh = String(hex).replace(/[^0-9a-fA-F]/g, '');
+  // Studio 21.1.0.17 compresses a dense ramp's protobuf KeyframesBA on
+  // re-export: marker 0x81, then a zstd frame. Preserve the stored entries for
+  // byte-exact re-encoding; decompress only the read view used below.
+  if (kh.startsWith('8128b52ffd')) {
+    const zlib = require('node:zlib');
+    const payload = Buffer.from(kh.slice(2), 'hex');
+    const plain = zlib.zstdDecompressSync ? zlib.zstdDecompressSync(payload) : require('fzstd').decompress(payload);
+    kh = Buffer.from(plain).toString('hex');
+  }
   if (kh.startsWith('00000001')) {
     const pts = [];
     for (const e of decodeKeyedDict(Buffer.from(kh, 'hex')).entries) {
@@ -107,19 +116,20 @@ function _decodeKeyframes(hex) {
     const origin = pts.length && pts[0].recordSec === 0 ? pts.shift() : { recordSec: 0, sourceSec: 0 };
     return { origin, keyframes: pts, keyed: true };
   }
-  const fields = decodeProtobuf(hex);
+  const fields = decodeProtobuf(kh);
   const originField = fields.find((f) => f.field === 2 && f.wire === 1);
   const originSource = originField
     ? (Buffer.isBuffer(originField.value)
       ? originField.value.readDoubleLE(0)
       : Number(originField.value))
     : 0;
-  return {
-    origin: { recordSec: 0, sourceSec: Number.isFinite(originSource) ? originSource : 0 },
-    keyframes: fields
-      .filter((f) => f.field === 1 && f.wire === 2)
-      .map((f) => _decodeKeyframePoint(f.value)),
-  };
+  const points = fields.filter((f) => f.field === 1 && f.wire === 2)
+    .map((f) => _decodeKeyframePoint(f.value));
+  // Dense 21.1 ramps encode their origin as an explicit X=0 point, rather
+  // than the top-level source offset used by reverse maps.
+  const origin = points.length && points[0].recordSec === 0 ? points.shift()
+    : { recordSec: 0, sourceSec: Number.isFinite(originSource) ? originSource : 0 };
+  return { origin, keyframes: points };
 }
 
 /** Per-segment speeds from the keyframe points (slope Δsource/Δrecord). */
@@ -337,10 +347,7 @@ function buildFreezeTimemapKeyed({ freezeFrame, sourceFrames, fps = 24, uniqueId
  * @param {Array<{durationFrames:number, speed:number}>} segments - record-domain
  *   pieces, in order from the cut head; speeds are source/record multipliers.
  */
-function buildRampTimemapKeyed({ segments, srcIn = 0, sourceFrames, fps = 24, uniqueId }) {
-  if (!Array.isArray(segments) || segments.length < 2) throw new TypeError('buildRampTimemapKeyed: segments must be an array of >= 2 {durationFrames, speed} pieces (use speed/freeze for a single one)');
-  if (!Number.isInteger(sourceFrames) || sourceFrames < 1) throw new TypeError('buildRampTimemapKeyed: sourceFrames must be a positive integer');
-  if (!Number.isInteger(srcIn) || srcIn < 0) throw new TypeError('buildRampTimemapKeyed: srcIn must be a non-negative integer');
+function _encodeRampPoints(points, lastValidYOffset, uniqueId) {
   const kf = (X, Y) => encodeKeyedDict({ hdr: 1, entries: [
     { key: 'interp', type: 0x02, subType: 0, value: 0 },
     { key: 'YOut', type: T_DOUBLE, subType: 0, value: 0 },
@@ -350,6 +357,23 @@ function buildRampTimemapKeyed({ segments, srcIn = 0, sourceFrames, fps = 24, un
     { key: 'XIn', type: T_DOUBLE, subType: 0, value: 0 },
     { key: 'X', type: T_DOUBLE, subType: 0, value: X },
   ] }).toString('hex');
+  const entries = points.map(([X, Y], i) => ({ key: String(i), type: T_BYTES, subType: 0, value: kf(X, Y) })).reverse();
+  const keyframes = encodeKeyedDict({ hdr: 1, entries }).toString('hex');
+  const [XMax, YMax] = points[points.length - 1];
+  return encodeKeyedDict({ hdr: 1, entries: [
+    { key: 'YMax', type: T_DOUBLE, subType: 0, value: YMax },
+    { key: 'XMax', type: T_DOUBLE, subType: 0, value: XMax },
+    { key: 'UniqueId', type: T_STRING, subType: 0, value: uniqueId },
+    { key: 'LastValidYOffset', type: T_DOUBLE, subType: 0, value: lastValidYOffset },
+    { key: 'KeyframesBA', type: T_BYTES, subType: 0, value: keyframes },
+    { key: 'DbType', type: T_STRING, subType: 0, value: 'Sm2TimeMap' },
+  ] });
+}
+
+function buildRampTimemapKeyed({ segments, srcIn = 0, sourceFrames, fps = 24, uniqueId }) {
+  if (!Array.isArray(segments) || segments.length < 2) throw new TypeError('buildRampTimemapKeyed: segments must be an array of >= 2 {durationFrames, speed} pieces (use speed/freeze for a single one)');
+  if (!Number.isInteger(sourceFrames) || sourceFrames < 1) throw new TypeError('buildRampTimemapKeyed: sourceFrames must be a positive integer');
+  if (!Number.isInteger(srcIn) || srcIn < 0) throw new TypeError('buildRampTimemapKeyed: srcIn must be a non-negative integer');
   let x = 0;
   let y = srcIn / fps;
   const points = [[x, y]];
@@ -364,23 +388,75 @@ function buildRampTimemapKeyed({ segments, srcIn = 0, sourceFrames, fps = 24, un
   if (sourceEnd > sourceFrames) {
     throw new RangeError(`buildRampTimemapKeyed: ramp consumes source frame ${Math.ceil(sourceEnd)} but the media has ${sourceFrames}`);
   }
-  const entries = points.map(([X, Y], i) => ({ key: String(i), type: T_BYTES, subType: 0, value: kf(X, Y) })).reverse();
-  const keyframes = encodeKeyedDict({ hdr: 1, entries }).toString('hex');
-  const [XMax, YMax] = points[points.length - 1];
-  return encodeKeyedDict({ hdr: 1, entries: [
-    { key: 'YMax', type: T_DOUBLE, subType: 0, value: YMax },
-    { key: 'XMax', type: T_DOUBLE, subType: 0, value: XMax },
-    { key: 'UniqueId', type: T_STRING, subType: 0, value: uniqueId },
-    { key: 'LastValidYOffset', type: T_DOUBLE, subType: 0, value: (sourceFrames - 1) / fps },
-    { key: 'KeyframesBA', type: T_BYTES, subType: 0, value: keyframes },
-    { key: 'DbType', type: T_STRING, subType: 0, value: 'Sm2TimeMap' },
-  ] });
+  return _encodeRampPoints(points, (sourceFrames - 1) / fps, uniqueId);
+}
+
+/** Smooth speed changes sampled once per output frame. The source-position
+ * curve uses only the proven linear native keyframes: unverified Bezier
+ * interpolation flags can crash Resolve during import. Speeds are multipliers,
+ * points address output frames 0..durationFrames-1, source positions use seconds.
+ */
+function buildSmoothRampTimemapKeyed({ points, durationFrames, sourceStartSec, sourceDurationSec, fps, uniqueId }) {
+  if (!Number.isInteger(durationFrames) || durationFrames < 2 || durationFrames > 100000) throw new RangeError('durationFrames must be 2..100000');
+  if (![fps, sourceDurationSec].every(v => Number.isFinite(v) && v > 0) || !Number.isFinite(sourceStartSec) || sourceStartSec < 0) throw new RangeError('invalid media/timeline timing');
+  if (!Array.isArray(points) || points.length < 2 || points.some((p, i) => !p || !Number.isInteger(p.frame) || !Number.isFinite(p.speed) || p.speed <= 0 || (i > 0 && p.frame <= points[i - 1].frame)) || points[0].frame !== 0 || points.at(-1).frame !== durationFrames - 1) throw new RangeError('points must have increasing integer frames, positive finite speeds, and cover 0..durationFrames-1');
+  let segment = 0;
+  const speeds = Array.from({ length: durationFrames }, (_, frame) => {
+    while (segment < points.length - 2 && frame > points[segment + 1].frame) segment++;
+    const a = points[segment], b = points[segment + 1];
+    const t = (frame - a.frame) / (b.frame - a.frame);
+    return a.speed + (b.speed - a.speed) * t * t * (3 - 2 * t);
+  });
+  // Both axes use seconds, including when source and output frame rates differ.
+  let sourceEndSec = sourceStartSec;
+  const positions = [[0, sourceStartSec]];
+  speeds.forEach((speed, i) => {
+    sourceEndSec += speed / fps;
+    positions.push([(i + 1) / fps, sourceEndSec]);
+  });
+  if (sourceEndSec > sourceDurationSec + 1e-9) throw new RangeError('speed ramp exceeds available source media');
+  return { hex: _encodeRampPoints(positions, sourceDurationSec, uniqueId).toString('hex'), sourceEndSec, speeds,
+    interpolation: 'smoothstep_speed_sampled_per_output_frame' };
+}
+
+/** Preserve an existing source span and solve an integer-frame output length.
+ * Input point positions address the OLD clip and are proportionally re-timed.
+ * Closest source extent wins; source_end_error_seconds reports normal output
+ * frame quantization rather than pretending every speed/range is exact.
+ */
+function buildRippleRampTimemapKeyed(p) {
+  const { points, durationFrames, sourceSpanSec, fps } = p;
+  if (!Number.isFinite(sourceSpanSec) || sourceSpanSec <= 0) throw new RangeError('sourceSpanSec must be positive');
+  // Validate the requested shape without requiring its old output duration to
+  // fit the source: that duration is precisely what this operation replaces.
+  buildSmoothRampTimemapKeyed({ ...p, sourceDurationSec: Number.MAX_VALUE });
+  let mean = 0;
+  for (let i = 1; i < points.length; i++) {
+    mean += (points[i].frame - points[i-1].frame) / (durationFrames - 1)
+      * (points[i].speed + points[i-1].speed) / 2;
+  }
+  const estimate = Math.round(sourceSpanSec * fps / mean);
+  let best = null;
+  const radius = Math.max(8, points.length * 2);
+  for (let d = Math.max(2, estimate-radius); d <= Math.min(100000, estimate+radius); d++) {
+    const adjusted = points.map(k => ({ frame: Math.round(k.frame / (durationFrames-1) * (d-1)), speed: k.speed }));
+    if (adjusted.some((k,i) => i && k.frame <= adjusted[i-1].frame)) continue;
+    let mapping;
+    try { mapping = buildSmoothRampTimemapKeyed({ ...p, points: adjusted, durationFrames: d }); }
+    catch (e) { if (/exceeds available source media/.test(e.message)) continue; throw e; }
+    const error = mapping.sourceEndSec - p.sourceStartSec - sourceSpanSec;
+    if (!best || Math.abs(error) < Math.abs(best.sourceEndErrorSec)) {
+      best = { ...mapping, durationFrames: d, speedPoints: adjusted, sourceEndErrorSec: error };
+    }
+  }
+  if (!best) throw new RangeError('No frame-quantized ramp fits the selected source range');
+  return best;
 }
 
 module.exports = {
   decodeTimemap, encodeTimemap, encodeRetimedTimemap,
   identityTimemap, buildConstantSpeedTimemap, buildConstantSpeedTimemapKeyed,
-  buildFreezeTimemapKeyed, buildRampTimemapKeyed,
-  buildTimemap, decodeProtobuf,
+  buildFreezeTimemapKeyed, buildRampTimemapKeyed, buildSmoothRampTimemapKeyed,
+  buildTimemap, decodeProtobuf, buildRippleRampTimemapKeyed,
   TYPE_LINEAR,
 };

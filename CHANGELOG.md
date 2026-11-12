@@ -4,6 +4,23 @@ Release history for the DaVinci Resolve MCP Server. The latest release is summar
 
 ## Unreleased
 
+- Add `timeline.set_speed_ramp`: smoothstep speed changes sampled per output
+  frame in a recoverable native DRT revision, with source bounds and imported
+  mapping verification. Defaults to preserving the trimmed source window to
+  frame precision, changing duration and rippling later tracks and markers;
+  explicit `ripple=false` preserves output duration. Aligned unlinked media
+  can be included through `additional_item_ids`. Refuses unrelated overlapping
+  items and locked tracks that would need to move. It
+  supports ordinary video and aligned linked video/audio groups. Linked audio
+  follows by default on 21.1+, with independent source offsets and WAV source
+  bounds preserved. A synthetic A2 WAV test verified all 19 rendered audio
+  events within 6 ms of the planned map. Fix dense 21.1 zstd timemap readback
+  and outdated guidance claiming constant speed is unavailable on 21.1.
+  Ripple validation shortened 96 to 40 frames with all eight source audio
+  events within 4 ms, later tracks/markers shifted and following-shot pixels
+  unchanged. Native ripple now preserves subframe audio duration/start suffixes.
+  Synthetic live validation passed on Windows Studio 21.1.0.17.
+
 - `timeline.ripple_insert` now creates a verified native DRT revision instead
   of deleting and rebuilding existing clips. Original timelines remain intact;
   opaque item payloads are retained in the patched archive, and readable state,

@@ -1,8 +1,8 @@
 # Timeline Edit Kernel Boundary
 
 The timeline edit kernel is the supported MCP layer for clip duplication,
-range-copy workflows, and timeline-item state copying. It is built only on
-DaVinci Resolve's public scripting API and preserves source media integrity:
+range-copy workflows, and timeline-item state copying. It uses
+DaVinci Resolve's public scripting API and surgical native DRT revisions and preserves source media integrity:
 it references existing Media Pool items and never transcodes, renders, proxies,
 or creates derivatives of source media.
 
@@ -36,6 +36,59 @@ The output directory receives both JSON and Markdown reports. Reports are
 generated artifacts and should not be committed.
 
 ## Supported Kernel Features
+
+### Smooth speed ramp revisions
+
+`timeline(action="set_speed_ramp", params={"timeline_item_id": "...",
+"speed_points": [{"frame": 0, "speed": 1}, {"frame": 28, "speed": 3},
+{"frame": 67, "speed": 3}, {"frame": 95, "speed": 1}]})` plans a ramp
+for a 96-frame clip. Frames address the current clip's 0 through duration-1; speeds
+are multipliers. `dry_run=false` creates/selects a native DRT revision and
+retains the original. Default `ripple=true` preserves the trimmed source window
+to frame precision, solves for a new whole-frame output duration, remaps the
+requested points proportionally, and shifts all following tracks by the duration
+change. Timeline markers after the old end shift by the same amount; markers
+inside the resized section scale proportionally. Marker collisions are refused.
+It changes retimed members' In, MediaTimemapBA and Duration fields and later
+items' Start fields, preserving the exported bytes of other payloads and ZIP
+members. Explicit `ripple=false` preserves output duration and surrounding edits
+instead, changing source use. A source overrun is refused. Aligned linked video/audio groups
+are included automatically; every retimed member must share record start and
+duration. Each retains its own source offset, track, item state and links,
+and receives the same speed curve in its own source time coordinates.
+Linked audio follows by default on Resolve 21.1+; older audio engines can
+ignore timemaps and are refused. `additional_item_ids` explicitly includes
+aligned unlinked audio/video without changing link topology. Unrelated items
+overlapping the resized section and locked tracks containing later items are
+refused. With `ripple=false`, `linked_audio="preserve"` explicitly retains
+audio timing and reports a sync warning. Compound/multicam clips, generators
+and multi-sequence archives are unsupported. FFprobe reads actual audio-stream
+durations, including WAV sources with no Resolve frame-count property.
+
+Speed is smoothstep eased between requested points and sampled per output
+frame. The native source-position curve uses linear keyframes, avoiding
+unverified Bezier flags. This is a sampled smooth ramp, not editable native
+Bezier speed handles. Native curve setters are still absent; 21.1's
+`timeline_item set_speed` provides constant speed, and `set_retime` provides
+interpolation quality only.
+
+Readback compares the imported timeline's readable state and re-exports its
+native timemap to check every output-frame source position. Failure restores
+the original and attempts to remove only the newly imported revision. It does
+not claim rendered verification. `tests/live_speed_ramp_validation.py`, run
+with `RESOLVE_VERIFY=1`, separately verifies six Resolve-rendered frames against
+the predicted source frames in a disposable synthetic project. Passed on
+Windows Studio 21.1.0.17, including nonzero source in and timecode, a transform
+and a timeline marker. Add `--linked` to test independent WAV audio on A2 with
+a different source offset: all 19 rendered beeps followed the predicted map
+within 6 ms, against a normal-speed control. Add `--linked --ripple` to verify
+source-preserving duration changes: the 96-frame clip became 40 frames, all
+eight source beeps followed the compressed timing within 4 ms, later video and
+audio shifted together, the following shot's rendered pixels matched, and
+timeline markers moved correctly. Native ripple preserves audio subframe
+remainders byte for byte when shifting whole frames.
+Exported dense protobuf timemaps may use a 0x81/zstd
+envelope; the reader supports it and explicit zero-time origin keyframes.
 
 ### Clip duplication
 
